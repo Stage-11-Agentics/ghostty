@@ -942,6 +942,13 @@ pub const Surface = struct {
         };
     }
 
+    pub fn textInputCallback(self: *Surface, text: []const u8) void {
+        _ = self.core_surface.textInputCallback(text) catch |err| {
+            log.err("error in text input callback err={}", .{err});
+            return;
+        };
+    }
+
     pub fn focusCallback(self: *Surface, focused: bool) void {
         self.core_surface.focusCallback(focused) catch |err| {
             log.err("error in focus callback err={}", .{err});
@@ -1702,6 +1709,23 @@ pub const CAPI = struct {
         return readTextLocked(surface, core_sel, result);
     }
 
+    /// Same as ghostty_surface_read_text but emits Ghostty-formatted HTML
+    /// for the given selection instead of plain text.
+    export fn ghostty_surface_read_text_html(
+        surface: *Surface,
+        sel: Selection,
+        result: *Text,
+    ) bool {
+        surface.core_surface.renderer_state.mutex.lock();
+        defer surface.core_surface.renderer_state.mutex.unlock();
+
+        const core_sel = sel.core(
+            surface.core_surface.renderer_state.terminal.screens.active,
+        ) orelse return false;
+
+        return readHTMLLocked(surface, core_sel, result);
+    }
+
     fn readTextLocked(
         surface: *Surface,
         core_sel: terminal.Selection,
@@ -1732,6 +1756,31 @@ pub const CAPI = struct {
             .offset_len = vp.offset_len,
             .text = text.text.ptr,
             .text_len = text.text.len,
+        };
+
+        return true;
+    }
+
+    fn readHTMLLocked(
+        surface: *Surface,
+        core_sel: terminal.Selection,
+        result: *Text,
+    ) bool {
+        const html = surface.core_surface.dumpHTMLLocked(
+            global.alloc,
+            core_sel,
+        ) catch |err| {
+            log.warn("error reading html err={}", .{err});
+            return false;
+        };
+
+        result.* = .{
+            .tl_px_x = -1,
+            .tl_px_y = -1,
+            .offset_start = 0,
+            .offset_len = 0,
+            .text = html.ptr,
+            .text_len = html.len,
         };
 
         return true;
@@ -1864,6 +1913,17 @@ pub const CAPI = struct {
         len: usize,
     ) void {
         surface.textCallback(ptr[0..len]);
+    }
+
+    /// Send committed text input to the terminal. This is treated like
+    /// typed text, not a paste. Newlines are normalized to carriage
+    /// returns and bracketed paste mode is not used.
+    export fn ghostty_surface_text_input(
+        surface: *Surface,
+        ptr: [*]const u8,
+        len: usize,
+    ) void {
+        surface.textInputCallback(ptr[0..len]);
     }
 
     /// Set the preedit text for the surface. This is used for IME

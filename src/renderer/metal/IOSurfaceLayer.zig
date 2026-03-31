@@ -137,13 +137,17 @@ fn setSurfaceCallback(
     const width: usize = @intFromFloat(bounds.size.width * scale);
     const height: usize = @intFromFloat(bounds.size.height * scale);
     if (width != surface.getWidth() or height != surface.getHeight()) {
-        log.debug(
-            "setSurfaceCallback(): surface is wrong size for layer, discarding. surface = {d}x{d}, layer = {d}x{d}",
+        log.warn(
+            "ios setSurfaceCallback discard surface={}x{} layer={}x{}",
             .{ surface.getWidth(), surface.getHeight(), width, height },
         );
         return;
     }
 
+    log.warn(
+        "ios setSurfaceCallback present surface={}x{} layer={}x{}",
+        .{ surface.getWidth(), surface.getHeight(), width, height },
+    );
     layer.setProperty("contents", surface);
 }
 
@@ -154,6 +158,10 @@ fn setSurfaceUncheckedCallback(
     const surface: *IOSurface = block.surface;
     defer surface.release();
 
+    log.warn(
+        "ios setSurfaceUncheckedCallback present surface={}x{}",
+        .{ surface.getWidth(), surface.getHeight() },
+    );
     layer.setProperty("contents", surface);
 }
 

@@ -3,8 +3,9 @@
 // isn't meant to be a general purpose embedding API (yet) so there hasn't
 // been documentation or example work beyond that.
 //
-// The only consumer of this API is the macOS app, but the API is built to
-// be more general purpose.
+// cmux uses this API on both macOS and iOS. The iOS integration depends on
+// manual surface I/O via ghostty_surface_config_s.io_mode, io_write_cb,
+// ghostty_surface_process_output, and ghostty_surface_text_input.
 #ifndef GHOSTTY_H
 #define GHOSTTY_H
 
@@ -1133,6 +1134,7 @@ GHOSTTY_API bool ghostty_surface_key_is_binding(ghostty_surface_t,
                                                    ghostty_input_key_s,
                                                    ghostty_binding_flags_e*);
 GHOSTTY_API void ghostty_surface_text(ghostty_surface_t, const char*, uintptr_t);
+GHOSTTY_API void ghostty_surface_text_input(ghostty_surface_t, const char*, uintptr_t);
 GHOSTTY_API void ghostty_surface_preedit(ghostty_surface_t, const char*, uintptr_t);
 GHOSTTY_API bool ghostty_surface_mouse_captured(ghostty_surface_t);
 GHOSTTY_API bool ghostty_surface_mouse_button(ghostty_surface_t,

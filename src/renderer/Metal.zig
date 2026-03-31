@@ -261,6 +261,18 @@ pub fn initTarget(self: *const Metal, width: usize, height: usize) !Target {
 
 /// Present the provided target.
 pub inline fn present(self: *Metal, target: Target, sync: bool) !void {
+    if (comptime builtin.os.tag == .ios) {
+        log.warn(
+            "ios present sync={} surface={}x{} layer_bounds={}",
+            .{
+                sync,
+                target.surface.getWidth(),
+                target.surface.getHeight(),
+                self.layer.layer.getProperty(graphics.Rect, "bounds"),
+            },
+        );
+    }
+
     // Most of the time we want top-left gravity to avoid stretching/jank.
     self.layer.layer.setProperty("contentsGravity", macos.animation.kCAGravityTopLeft);
 
@@ -279,6 +291,17 @@ pub inline fn present(self: *Metal, target: Target, sync: bool) !void {
 /// Present the last presented target again.
 pub inline fn presentLastTarget(self: *Metal) !void {
     const surface = self.last_surface orelse return;
+
+    if (comptime builtin.os.tag == .ios) {
+        log.warn(
+            "ios presentLastTarget surface={}x{} layer_bounds={}",
+            .{
+                surface.getWidth(),
+                surface.getHeight(),
+                self.layer.layer.getProperty(graphics.Rect, "bounds"),
+            },
+        );
+    }
 
     // Keep top-left gravity during resize replay so stale surfaces never stretch.
     // Newly exposed regions use the layer background until a correctly sized frame arrives.

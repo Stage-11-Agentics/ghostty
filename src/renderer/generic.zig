@@ -1506,6 +1506,20 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // blank flash. To avoid this, satisfy the synchronous display by re-presenting the
             // last completed frame and let the normal render loop catch up on the next tick.
             if (sync and size_changed and self.has_presented.load(.monotonic)) {
+                if (comptime builtin.os.tag == .ios) {
+                    log.warn(
+                        "ios drawFrame early presentLastTarget size_changed surface={}x{} grid={}x{} cells={}x{} has_presented={}",
+                        .{
+                            surface_size.width,
+                            surface_size.height,
+                            self.size.grid().columns,
+                            self.size.grid().rows,
+                            self.cells.size.columns,
+                            self.cells.size.rows,
+                            self.has_presented.load(.monotonic),
+                        },
+                    );
+                }
                 try self.api.presentLastTarget();
                 return;
             }
@@ -1529,6 +1543,19 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 if (expected_grid.columns != self.cells.size.columns or
                     expected_grid.rows != self.cells.size.rows)
                 {
+                    if (comptime builtin.os.tag == .ios) {
+                        log.warn(
+                            "ios drawFrame wait_cells surface={}x{} expected={}x{} cells={}x{}",
+                            .{
+                                surface_size.width,
+                                surface_size.height,
+                                expected_grid.columns,
+                                expected_grid.rows,
+                                self.cells.size.columns,
+                                self.cells.size.rows,
+                            },
+                        );
+                    }
                     try self.api.presentLastTarget();
                     return;
                 }
@@ -1543,6 +1570,18 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 sync;
 
             if (!needs_redraw) {
+                if (comptime builtin.os.tag == .ios) {
+                    log.warn(
+                        "ios drawFrame no_redraw surface={}x{} size_changed={} cells_rebuilt={} sync={}",
+                        .{
+                            surface_size.width,
+                            surface_size.height,
+                            size_changed,
+                            self.cells_rebuilt,
+                            sync,
+                        },
+                    );
+                }
                 // We still need to present the last target again, because the
                 // apprt may be swapping buffers and display an outdated frame
                 // if we don't draw something new.
