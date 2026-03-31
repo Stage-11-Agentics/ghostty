@@ -790,6 +790,12 @@ pub const Surface = struct {
     }
 
     pub fn draw(self: *Surface) void {
+        // In embedded mode, the render thread's main loop is not running,
+        // so we need to drain the mailbox here to process pending messages
+        // like config changes (background color, font, etc).
+        self.core_surface.renderer_thread.drainMailbox() catch |err| {
+            log.err("error draining renderer mailbox err={}", .{err});
+        };
         self.core_surface.draw() catch |err| {
             log.err("error in draw err={}", .{err});
             return;

@@ -334,7 +334,7 @@ fn syncDrawTimer(self: *Thread) void {
 }
 
 /// Drain the mailbox.
-fn drainMailbox(self: *Thread) !void {
+pub fn drainMailbox(self: *Thread) !void {
     // There's probably a more elegant way to do this...
     //
     // This is effectively an @autoreleasepool{} block, which we need in
