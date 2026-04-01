@@ -422,6 +422,44 @@ pub inline fn queueWrite(
     data: []const u8,
     linefeed: bool,
 ) !void {
+    // If tmux control mode is active, wrap keystrokes as send-keys commands
+    // instead of writing raw bytes to the PTY. In control mode, raw stdin
+    // is interpreted as tmux commands, not pane input.
+    if (comptime StreamHandler.tmux_enabled) {
+        if (self.terminal_stream.handler.tmux_viewer) |viewer| {
+            // Use the first pane as the target
+            const keys = viewer.panes.keys();
+            if (keys.len > 0) {
+                const pane_id = keys[0];
+                // Format: send-keys -H -t %<paneID> <hex bytes>\n
+                // Build the command string
+                var cmd_buf: [4096]u8 = undefined;
+                var cmd_len: usize = 0;
+                const prefix = std.fmt.bufPrint(
+                    cmd_buf[0..],
+                    "send-keys -H -t %{d}",
+                    .{pane_id},
+                ) catch return;
+                cmd_len = prefix.len;
+
+                for (data) |byte| {
+                    const hex = std.fmt.bufPrint(
+                        cmd_buf[cmd_len..],
+                        " {X:0>2}",
+                        .{byte},
+                    ) catch break;
+                    cmd_len += hex.len;
+                }
+
+                if (cmd_len + 1 < cmd_buf.len) {
+                    cmd_buf[cmd_len] = '\n';
+                    cmd_len += 1;
+                    try self.backend.queueWrite(self.alloc, td, cmd_buf[0..cmd_len], false);
+                }
+                return;
+            }
+        }
+    }
     try self.backend.queueWrite(self.alloc, td, data, linefeed);
 }
 
