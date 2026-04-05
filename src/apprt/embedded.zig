@@ -416,6 +416,7 @@ pub const Surface = struct {
     platform: Platform,
     userdata: ?*anyopaque = null,
     core_surface: CoreSurface,
+    focused: bool = true,
     content_scale: apprt.ContentScale,
     size: apprt.SurfaceSize,
     cursor_pos: apprt.CursorPos,
@@ -440,6 +441,11 @@ pub const Surface = struct {
 
         /// The scale factor of the screen.
         scale_factor: f64 = 1,
+
+        /// Initial focused state for the surface. This seeds the core focus
+        /// bookkeeping without triggering focus-reporting side effects during
+        /// surface creation.
+        focused: bool = true,
 
         /// The font size to inherit. If 0, default font size will be used.
         font_size: f32 = 0,
@@ -486,6 +492,7 @@ pub const Surface = struct {
             .platform = try .init(opts.platform_tag, opts.platform),
             .userdata = opts.userdata,
             .core_surface = undefined,
+            .focused = opts.focused,
             .content_scale = .{
                 .x = @floatCast(opts.scale_factor),
                 .y = @floatCast(opts.scale_factor),
@@ -651,6 +658,10 @@ pub const Surface = struct {
 
     pub fn ioMode(self: *const Surface) IoMode {
         return self.io_mode;
+    }
+
+    pub fn initialFocused(self: *const Surface) bool {
+        return self.focused;
     }
 
     pub fn ioWriteCallback(self: *const Surface) ?IoWriteCallback {
@@ -932,6 +943,7 @@ pub const Surface = struct {
     }
 
     pub fn focusCallback(self: *Surface, focused: bool) void {
+        self.focused = focused;
         self.core_surface.focusCallback(focused) catch |err| {
             log.err("error in focus callback err={}", .{err});
             return;
@@ -970,6 +982,7 @@ pub const Surface = struct {
         };
 
         return .{
+            .focused = self.focused,
             .font_size = font_size,
             .working_directory = working_directory,
             .context = context,

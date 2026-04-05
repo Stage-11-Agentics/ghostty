@@ -449,6 +449,7 @@ typedef struct {
   ghostty_platform_u platform;
   void* userdata;
   double scale_factor;
+  bool focused;
   float font_size;
   const char* working_directory;
   const char* command;
