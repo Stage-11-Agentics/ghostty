@@ -72,7 +72,7 @@ pub fn main() !MainReturn {
     }
 
     if (comptime build_config.app_runtime == .none) {
-        const stdout = std.io.getStdOut().writer();
+        const stdout = (std.fs.File{ .handle = std.posix.STDOUT_FILENO }).deprecatedWriter();
         try stdout.print("Usage: ghostty +<action> [flags]\n\n", .{});
         try stdout.print(
             \\This is the Ghostty helper CLI that accompanies the graphical Ghostty app.
