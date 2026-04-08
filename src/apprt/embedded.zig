@@ -1802,6 +1802,13 @@ pub const CAPI = struct {
         surface.drawNow();
     }
 
+    /// Perform a full render cycle synchronously from the calling thread.
+    /// On iOS, xev async notifications do not reach the renderer thread,
+    /// so the display link must call this instead of ghostty_surface_draw_now.
+    export fn ghostty_surface_render_now(surface: *Surface) void {
+        surface.core_surface.renderer_thread.renderNow();
+    }
+
     /// Update the size of a surface. This will trigger resize notifications
     /// to the pty and the renderer.
     export fn ghostty_surface_set_size(surface: *Surface, w: u32, h: u32) void {
