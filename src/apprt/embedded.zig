@@ -1803,9 +1803,13 @@ pub const CAPI = struct {
     }
 
     /// Perform a full render cycle synchronously from the calling thread.
-    /// On iOS, xev async notifications do not reach the renderer thread,
-    /// so the display link must call this instead of ghostty_surface_draw_now.
+    /// On iOS, xev async notifications do not reach the renderer or IO
+    /// threads, so this also applies pending terminal resizes directly.
     export fn ghostty_surface_render_now(surface: *Surface) void {
+        // On iOS, the IO thread can't process resize events from its xev loop.
+        // Apply pending resize directly so the terminal grid matches the surface.
+        surface.core_surface.applyPendingResizeIfNeeded();
+
         surface.core_surface.renderer_thread.renderNow();
     }
 

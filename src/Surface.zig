@@ -2575,6 +2575,32 @@ fn resize(self: *Surface, size: rendererpkg.ScreenSize) !void {
     self.queueIo(.{ .resize = self.size }, .unlocked);
 }
 
+/// Apply pending terminal resize directly from the calling thread.
+/// On iOS, the IO thread's xev loop doesn't process resize messages,
+/// so we resize the terminal here before rendering.
+pub fn applyPendingResizeIfNeeded(self: *Surface) void {
+    const grid_size = self.size.grid();
+    if (grid_size.columns == 0 or grid_size.rows == 0) return;
+
+    self.renderer_state.mutex.lock();
+    defer self.renderer_state.mutex.unlock();
+    const t = self.renderer_state.terminal;
+
+    if (t.cols == grid_size.columns and t.rows == grid_size.rows) return;
+
+    t.resize(
+        self.alloc,
+        grid_size.columns,
+        grid_size.rows,
+    ) catch |err| {
+        log.warn("applyPendingResizeIfNeeded: resize error={}", .{err});
+        return;
+    };
+
+    t.width_px = grid_size.columns * self.size.cell.width;
+    t.height_px = grid_size.rows * self.size.cell.height;
+}
+
 /// Recalculate the balanced padding if needed.
 fn balancePaddingIfNeeded(self: *Surface) void {
     if (!self.config.window_padding_balance) return;

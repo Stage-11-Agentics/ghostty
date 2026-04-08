@@ -1496,9 +1496,15 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // thread delivers the new terminal state/cell buffers, we can show a single-frame
             // blank flash. To avoid this, satisfy the synchronous display by re-presenting the
             // last completed frame and let the normal render loop catch up on the next tick.
-            if (sync and size_changed and self.has_presented.load(.monotonic)) {
-                try self.api.presentLastTarget();
-                return;
+            //
+            // On iOS, we skip these early-returns because the IO thread's xev loop doesn't
+            // process resize events. The terminal is resized directly by the caller, so we
+            // should always proceed to draw a new frame at the current size.
+            if (comptime builtin.os.tag != .ios) {
+                if (sync and size_changed and self.has_presented.load(.monotonic)) {
+                    try self.api.presentLastTarget();
+                    return;
+                }
             }
 
             // During resize/layout transitions, the platform can trigger draws before the IO
@@ -1510,18 +1516,20 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // Detect this by computing the expected grid for the current surface size and
             // comparing it to the currently rebuilt cell buffer grid. If they don't match, keep
             // the last presented frame on-screen until the new cells arrive.
-            if (size_changed) {
-                const expected_grid = (renderer.Size{
-                    .screen = .{ .width = surface_size.width, .height = surface_size.height },
-                    .cell = self.size.cell,
-                    .padding = self.size.padding,
-                }).grid();
+            if (comptime builtin.os.tag != .ios) {
+                if (size_changed) {
+                    const expected_grid = (renderer.Size{
+                        .screen = .{ .width = surface_size.width, .height = surface_size.height },
+                        .cell = self.size.cell,
+                        .padding = self.size.padding,
+                    }).grid();
 
-                if (expected_grid.columns != self.cells.size.columns or
-                    expected_grid.rows != self.cells.size.rows)
-                {
-                    try self.api.presentLastTarget();
-                    return;
+                    if (expected_grid.columns != self.cells.size.columns or
+                        expected_grid.rows != self.cells.size.rows)
+                    {
+                        try self.api.presentLastTarget();
+                        return;
+                    }
                 }
             }
 

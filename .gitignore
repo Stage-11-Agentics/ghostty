@@ -30,3 +30,5 @@ vgcore.*
 *.o
 =======
 >>>>>>> origin/main
+GhosttyKit.xcframework
+__.SYMDEF
