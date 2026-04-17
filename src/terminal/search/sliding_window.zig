@@ -3,6 +3,7 @@ const assert = @import("../../quirks.zig").inlineAssert;
 const Allocator = std.mem.Allocator;
 const CircBuf = @import("../../datastruct/main.zig").CircBuf;
 const terminal = @import("../main.zig");
+const Page = terminal.Page;
 const point = terminal.point;
 const size = terminal.size;
 const PageList = terminal.PageList;
@@ -31,9 +32,9 @@ const FlattenedHighlight = terminal.highlight.Flattened;
 /// required memory to search for the needle.
 ///
 /// The caller is responsible for providing the pages and ensuring they're
-/// in the proper order. The SlidingWindow itself doesn't own the pages, but
-/// it will contain pointers to them in order to return selections. If any
-/// pages become invalid, the caller should clear the sliding window and
+/// in the proper order. The SlidingWindow snapshots page contents on append,
+/// but it still retains node pointers to report matches back to the caller.
+/// If any pages become invalid, the caller should clear the sliding window and
 /// start over.
 pub const SlidingWindow = struct {
     /// The allocator to use for all the data within this window. We
@@ -89,10 +90,31 @@ pub const SlidingWindow = struct {
     const Meta = struct {
         node: *PageList.List.Node,
         serial: u64,
+        rows: size.CellCountInt,
         cell_map: std.ArrayList(point.Coordinate),
 
         pub fn deinit(self: *Meta, alloc: Allocator) void {
             self.cell_map.deinit(alloc);
+        }
+    };
+
+    const PageSnapshot = struct {
+        page: Page,
+        node: *PageList.List.Node,
+        serial: u64,
+        rows: size.CellCountInt,
+
+        fn capture(node: *PageList.List.Node) Allocator.Error!PageSnapshot {
+            return .{
+                .page = try node.data.clone(),
+                .node = node,
+                .serial = node.serial,
+                .rows = node.data.size.rows,
+            };
+        }
+
+        fn deinit(self: *PageSnapshot) void {
+            self.page.deinit();
         }
     };
 
@@ -355,6 +377,7 @@ pub const SlidingWindow = struct {
                     self.chunk_buf.appendAssumeCapacity(.{
                         .node = meta.node,
                         .serial = meta.serial,
+                        .rows = meta.rows,
                         .start = @intCast(start_map.y),
                         .end = @intCast(end_map.y + 1),
                     });
@@ -374,8 +397,9 @@ pub const SlidingWindow = struct {
                     self.chunk_buf.appendAssumeCapacity(.{
                         .node = meta.node,
                         .serial = meta.serial,
+                        .rows = meta.rows,
                         .start = @intCast(map.y),
-                        .end = meta.node.data.size.rows,
+                        .end = meta.rows,
                     });
 
                     break :tl .{
@@ -409,8 +433,9 @@ pub const SlidingWindow = struct {
                     self.chunk_buf.appendAssumeCapacity(.{
                         .node = meta.node,
                         .serial = meta.serial,
+                        .rows = meta.rows,
                         .start = 0,
-                        .end = meta.node.data.size.rows,
+                        .end = meta.rows,
                     });
 
                     meta_consumed += meta.cell_map.items.len;
@@ -423,6 +448,7 @@ pub const SlidingWindow = struct {
                 self.chunk_buf.appendAssumeCapacity(.{
                     .node = meta.node,
                     .serial = meta.serial,
+                    .rows = meta.rows,
                     .start = 0,
                     .end = @intCast(map.y + 1),
                 });
@@ -465,12 +491,14 @@ pub const SlidingWindow = struct {
             .reverse => {
                 const slice = self.chunk_buf.slice();
                 const nodes = slice.items(.node);
+                const rows = slice.items(.rows);
                 const starts = slice.items(.start);
                 const ends = slice.items(.end);
 
                 if (self.chunk_buf.len > 1) {
                     // Reverse all our chunks. This should be pretty obvious why.
                     std.mem.reverse(*PageList.List.Node, nodes);
+                    std.mem.reverse(size.CellCountInt, rows);
                     std.mem.reverse(size.CellCountInt, starts);
                     std.mem.reverse(size.CellCountInt, ends);
 
@@ -491,7 +519,7 @@ pub const SlidingWindow = struct {
                     // order.
                     assert(nodes.len >= 2);
                     starts[0] = ends[0] - 1;
-                    ends[0] = nodes[0].data.size.rows;
+                    ends[0] = rows[0];
                     ends[nodes.len - 1] = starts[nodes.len - 1] + 1;
                     starts[nodes.len - 1] = 0;
                 } else {
@@ -527,10 +555,20 @@ pub const SlidingWindow = struct {
         self: *SlidingWindow,
         node: *PageList.List.Node,
     ) Allocator.Error!usize {
+        var snapshot = try PageSnapshot.capture(node);
+        defer snapshot.deinit();
+        return try self.appendSnapshot(&snapshot);
+    }
+
+    fn appendSnapshot(
+        self: *SlidingWindow,
+        snapshot: *const PageSnapshot,
+    ) Allocator.Error!usize {
         // Initialize our metadata for the node.
         var meta: Meta = .{
-            .node = node,
-            .serial = node.serial,
+            .node = snapshot.node,
+            .serial = snapshot.serial,
+            .rows = snapshot.rows,
             .cell_map = .empty,
         };
         errdefer meta.deinit(self.alloc);
@@ -544,7 +582,7 @@ pub const SlidingWindow = struct {
 
         // Encode the page into the buffer.
         const formatter: PageFormatter = formatter: {
-            var formatter: PageFormatter = .init(&meta.node.data, .{
+            var formatter: PageFormatter = .init(&snapshot.page, .{
                 .emit = .plain,
                 .unwrap = true,
             });
@@ -563,7 +601,7 @@ pub const SlidingWindow = struct {
 
         // If the node we're adding isn't soft-wrapped, we add the
         // trailing newline.
-        const row = node.data.getRow(node.data.size.rows - 1);
+        const row = snapshot.page.getRow(snapshot.rows - 1);
         if (!row.wrap) {
             encoded.writer.writeByte('\n') catch return error.OutOfMemory;
             try meta.cell_map.append(
@@ -1672,5 +1710,54 @@ test "SlidingWindow append whitespace only node" {
     _ = try w.append(node);
 
     // No matches expected
+    try testing.expect(w.next() == null);
+}
+
+test "SlidingWindow retained snapshot survives source screen deinit" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var w: SlidingWindow = try .init(alloc, .forward, "hello, world");
+    defer w.deinit();
+
+    var s = try Screen.init(alloc, .{ .cols = 80, .rows = 24, .max_scrollback = 1000 });
+
+    const first_page_rows = s.pages.pages.first.?.data.capacity.rows;
+    for (0..first_page_rows - 1) |_| try s.testWriteString("\n");
+    for (0..s.pages.cols - 4) |_| try s.testWriteString("x");
+    try s.testWriteString("hell");
+    try testing.expect(s.pages.pages.first == s.pages.pages.last);
+    try s.testWriteString("o, world!");
+    try testing.expect(s.pages.pages.first != s.pages.pages.last);
+
+    const first: *PageList.List.Node = s.pages.pages.first.?;
+    const second: *PageList.List.Node = first.next.?;
+    const first_rows = first.data.size.rows;
+    const second_rows = second.data.size.rows;
+    const first_serial = first.serial;
+    const second_serial = second.serial;
+
+    var first_snapshot = try PageSnapshot.capture(first);
+    defer first_snapshot.deinit();
+    var second_snapshot = try PageSnapshot.capture(second);
+    defer second_snapshot.deinit();
+
+    s.deinit();
+
+    _ = try w.appendSnapshot(&first_snapshot);
+    _ = try w.appendSnapshot(&second_snapshot);
+
+    const h = w.next().?;
+    const slice = h.chunks.slice();
+    try testing.expectEqual(@as(usize, 2), slice.len);
+    try testing.expectEqual(@as(size.CellCountInt, 76), h.top_x);
+    try testing.expectEqual(@as(size.CellCountInt, 7), h.bot_x);
+    try testing.expectEqual(first_serial, slice.items(.serial)[0]);
+    try testing.expectEqual(second_serial, slice.items(.serial)[1]);
+    try testing.expectEqual(@as(size.CellCountInt, 22), slice.items(.start)[0]);
+    try testing.expectEqual(first_rows, slice.items(.end)[0]);
+    try testing.expectEqual(@as(size.CellCountInt, 0), slice.items(.start)[1]);
+    try testing.expectEqual(second_rows, slice.items(.end)[1]);
+    try testing.expect(w.next() == null);
     try testing.expect(w.next() == null);
 }

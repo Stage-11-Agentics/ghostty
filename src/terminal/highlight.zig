@@ -13,7 +13,6 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const size = @import("size.zig");
 const PageList = @import("PageList.zig");
-const PageChunk = PageList.PageIterator.Chunk;
 const Pin = PageList.Pin;
 const Screen = @import("Screen.zig");
 
@@ -128,6 +127,7 @@ pub const Flattened = struct {
     pub const Chunk = struct {
         node: *PageList.List.Node,
         serial: u64,
+        rows: size.CellCountInt,
         start: size.CellCountInt,
         end: size.CellCountInt,
     };
@@ -143,19 +143,20 @@ pub const Flattened = struct {
         start: Pin,
         end: Pin,
     ) Allocator.Error!Flattened {
-        var result: std.MultiArrayList(PageChunk) = .empty;
+        var result: std.MultiArrayList(Chunk) = .empty;
         errdefer result.deinit(alloc);
         var it = start.pageIterator(.right_down, end);
         while (it.next()) |chunk| try result.append(alloc, .{
             .node = chunk.node,
             .serial = chunk.node.serial,
+            .rows = chunk.node.data.size.rows,
             .start = chunk.start,
             .end = chunk.end,
         });
         return .{
             .chunks = result,
             .top_x = start.x,
-            .end_x = end.x,
+            .bot_x = end.x,
         };
     }
 
