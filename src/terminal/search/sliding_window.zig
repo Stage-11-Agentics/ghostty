@@ -106,7 +106,7 @@ pub const SlidingWindow = struct {
 
         fn capture(node: *PageList.List.Node) Allocator.Error!PageSnapshot {
             return .{
-                .page = try node.data.clone(),
+                .page = node.data.clone() catch return error.OutOfMemory,
                 .node = node,
                 .serial = node.serial,
                 .rows = node.data.size.rows,
@@ -1737,9 +1737,9 @@ test "SlidingWindow retained snapshot survives source screen deinit" {
     const first_serial = first.serial;
     const second_serial = second.serial;
 
-    var first_snapshot = try PageSnapshot.capture(first);
+    var first_snapshot = try SlidingWindow.PageSnapshot.capture(first);
     defer first_snapshot.deinit();
-    var second_snapshot = try PageSnapshot.capture(second);
+    var second_snapshot = try SlidingWindow.PageSnapshot.capture(second);
     defer second_snapshot.deinit();
 
     s.deinit();
