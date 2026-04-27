@@ -89,6 +89,10 @@ pub const SlidingWindow = struct {
     const Meta = struct {
         node: *PageList.List.Node,
         serial: u64,
+        /// Snapshot of node.data.size.rows taken under the terminal lock
+        /// during append(). Allows highlight() to produce correct chunk
+        /// boundaries without re-reading the live page pointer.
+        rows: size.CellCountInt,
         cell_map: std.ArrayList(point.Coordinate),
 
         pub fn deinit(self: *Meta, alloc: Allocator) void {
@@ -357,6 +361,7 @@ pub const SlidingWindow = struct {
                         .serial = meta.serial,
                         .start = @intCast(start_map.y),
                         .end = @intCast(end_map.y + 1),
+                        .page_rows = meta.rows,
                     });
 
                     break :tl .{
@@ -375,7 +380,8 @@ pub const SlidingWindow = struct {
                         .node = meta.node,
                         .serial = meta.serial,
                         .start = @intCast(map.y),
-                        .end = meta.node.data.size.rows,
+                        .end = meta.rows,
+                        .page_rows = meta.rows,
                     });
 
                     break :tl .{
@@ -410,7 +416,8 @@ pub const SlidingWindow = struct {
                         .node = meta.node,
                         .serial = meta.serial,
                         .start = 0,
-                        .end = meta.node.data.size.rows,
+                        .end = meta.rows,
+                        .page_rows = meta.rows,
                     });
 
                     meta_consumed += meta.cell_map.items.len;
@@ -425,6 +432,7 @@ pub const SlidingWindow = struct {
                     .serial = meta.serial,
                     .start = 0,
                     .end = @intCast(map.y + 1),
+                    .page_rows = meta.rows,
                 });
                 break;
             } else {
@@ -473,6 +481,8 @@ pub const SlidingWindow = struct {
                     std.mem.reverse(*PageList.List.Node, nodes);
                     std.mem.reverse(size.CellCountInt, starts);
                     std.mem.reverse(size.CellCountInt, ends);
+                    const page_rows = slice.items(.page_rows);
+                    std.mem.reverse(size.CellCountInt, page_rows);
 
                     // Now normally with forward traversal with multiple pages,
                     // the suffix of the first page and the prefix of the last
@@ -491,7 +501,7 @@ pub const SlidingWindow = struct {
                     // order.
                     assert(nodes.len >= 2);
                     starts[0] = ends[0] - 1;
-                    ends[0] = nodes[0].data.size.rows;
+                    ends[0] = page_rows[0];
                     ends[nodes.len - 1] = starts[nodes.len - 1] + 1;
                     starts[nodes.len - 1] = 0;
                 } else {
@@ -527,10 +537,13 @@ pub const SlidingWindow = struct {
         self: *SlidingWindow,
         node: *PageList.List.Node,
     ) Allocator.Error!usize {
-        // Initialize our metadata for the node.
+        // Initialize our metadata for the node. rows is snapshotted here
+        // (under the caller's terminal lock) so that highlight() can build
+        // correct chunk boundaries without touching the live page pointer.
         var meta: Meta = .{
             .node = node,
             .serial = node.serial,
+            .rows = node.data.size.rows,
             .cell_map = .empty,
         };
         errdefer meta.deinit(self.alloc);
@@ -1673,4 +1686,44 @@ test "SlidingWindow append whitespace only node" {
 
     // No matches expected
     try testing.expect(w.next() == null);
+}
+
+test "SlidingWindow rows snapshot is taken at append time" {
+    // Regression test for the PageFormatter SIGSEGV race (manaflow-ai/cmux#2738).
+    // SlidingWindow.highlight() must use the snapshotted page row count rather
+    // than dereferencing the live node pointer, because resizeCols() on the IO
+    // thread can free old page nodes while the search thread calls next() without
+    // holding the terminal lock.
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var w: SlidingWindow = try .init(alloc, .forward, "hello");
+    defer w.deinit();
+
+    var s = try Screen.init(alloc, .{ .cols = 80, .rows = 24, .max_scrollback = 1000 });
+    defer s.deinit();
+    try s.testWriteString("hello world");
+
+    const node = s.pages.pages.first.?;
+    const rows_before_append = node.data.size.rows;
+
+    // Append the node (simulates what feed() does under the terminal lock).
+    _ = try w.append(node);
+
+    // Verify the snapshot was captured correctly.
+    {
+        const meta_it = w.meta.iterator(.forward);
+        _ = meta_it;
+        try testing.expect(w.meta.len() == 1);
+    }
+
+    // Mutate size.rows to simulate what resizeCols() does (which runs on the
+    // IO thread without any additional search-side synchronization).
+    node.data.size.rows = 1;
+    defer node.data.size.rows = rows_before_append;
+
+    // next() must not segfault and must return a valid result using the
+    // snapshotted row count, not the mutated live value.
+    const h = w.next();
+    try testing.expect(h != null);
 }

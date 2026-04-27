@@ -130,6 +130,10 @@ pub const Flattened = struct {
         serial: u64,
         start: size.CellCountInt,
         end: size.CellCountInt,
+        /// Snapshot of node.data.size.rows taken when the chunk was
+        /// created. Used by SlidingWindow.highlight() so it does not need
+        /// to dereference the live page pointer outside a terminal lock.
+        page_rows: size.CellCountInt,
     };
 
     pub const empty: Flattened = .{
@@ -143,7 +147,7 @@ pub const Flattened = struct {
         start: Pin,
         end: Pin,
     ) Allocator.Error!Flattened {
-        var result: std.MultiArrayList(PageChunk) = .empty;
+        var result: std.MultiArrayList(Chunk) = .empty;
         errdefer result.deinit(alloc);
         var it = start.pageIterator(.right_down, end);
         while (it.next()) |chunk| try result.append(alloc, .{
@@ -151,11 +155,12 @@ pub const Flattened = struct {
             .serial = chunk.node.serial,
             .start = chunk.start,
             .end = chunk.end,
+            .page_rows = chunk.node.data.size.rows,
         });
         return .{
             .chunks = result,
             .top_x = start.x,
-            .end_x = end.x,
+            .bot_x = end.x,
         };
     }
 
