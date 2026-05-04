@@ -165,10 +165,36 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) !Metal {
 }
 
 pub fn deinit(self: *Metal) void {
+    // Detach the display callback before any release. If a CAMetalLayer
+    // display tick fires after the parent Renderer is freed, the stored
+    // *Renderer pointer would dangle. Setting both ivars to null first
+    // makes the layer's drawInContext bail cleanly.
+    self.layer.setDisplayCallback(null, null);
+
+    // Drain the command queue with a synchronous no-op command buffer.
+    // SwapChain.deinit waits on the frame semaphore, which only proves
+    // each completion handler has *started* on Metal's scheduler thread.
+    // It does NOT prove the surrounding MTLSchedulerRequest trampoline
+    // (the block dispatched by generateMonolithicBlock) has unwound.
+    // Releasing self.queue while the trampoline is mid-cleanup races
+    // with Metal's internal MTLSchedulerRequest::release() and SIGABRTs.
+    // A committed-and-waited empty command buffer forces the scheduler
+    // to fully drain anything tied to this queue before we release it.
+    {
+        const pool = objc.AutoreleasePool.init();
+        defer pool.deinit();
+        const buf = self.queue.msgSend(objc.Object, objc.sel("commandBuffer"), .{});
+        buf.msgSend(void, objc.sel("commit"), .{});
+        buf.msgSend(void, objc.sel("waitUntilCompleted"), .{});
+    }
+
+    // Release order matters: drop the layer first (which releases any
+    // pending presentation request), then the queue (now safe because
+    // we just drained it), then the device (which the queue retained).
     if (self.last_surface) |s| s.release();
+    self.layer.release();
     self.queue.release();
     self.device.release();
-    self.layer.release();
 }
 
 pub fn loopEnter(self: *Metal) void {
