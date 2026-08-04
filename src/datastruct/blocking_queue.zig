@@ -246,3 +246,53 @@ test "timed push" {
     // Timed push should fail
     try testing.expectEqual(@as(Q.Size, 0), q.push(2, .{ .ns = 1000 }));
 }
+
+// Regression coverage for the deadlock behind c11's C11-191 / ghostty's
+// `ghostty_surface_set_display_id`: that export pushed `.forever` into the
+// renderer's bounded mailbox *from the embedder's UI thread*, so a renderer that
+// stopped draining parked the UI thread in a futex wait with no timeout. The
+// field symptom was a main thread wedged inside one call for 13h58m.
+//
+// This pins the property the fix relies on: against a full queue, `.forever`
+// does not return while `.instant` does. If a future refactor makes `.instant`
+// block, this fails.
+test "forever push on a full queue blocks its caller; instant does not" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const Q = BlockingQueue(u64, 1);
+    const q = try Q.create(alloc);
+    defer q.destroy(alloc);
+
+    // Fill the queue. This is the state a wedged renderer thread leaves behind.
+    try testing.expectEqual(@as(Q.Size, 1), q.push(1, .{ .instant = {} }));
+
+    // The shape the export uses now: returns immediately, reports the drop.
+    var timer = try std.time.Timer.start();
+    try testing.expectEqual(@as(Q.Size, 0), q.push(2, .{ .instant = {} }));
+    try testing.expect(timer.read() < 100 * std.time.ns_per_ms);
+
+    // The shape it used to use: still parked a full second later. Anything the
+    // UI thread wanted to do in that second -- including drawing a frame or
+    // answering a hang watchdog -- does not happen.
+    const Blocker = struct {
+        queue: *Q,
+        returned: std.atomic.Value(bool) = .init(false),
+
+        fn run(self: *@This()) void {
+            _ = self.queue.push(3, .{ .forever = {} });
+            self.returned.store(true, .release);
+        }
+    };
+    var blocker: Blocker = .{ .queue = q };
+    const thread = try std.Thread.spawn(.{}, Blocker.run, .{&blocker});
+
+    std.Thread.sleep(1 * std.time.ns_per_s);
+    try testing.expect(!blocker.returned.load(.acquire));
+
+    // Release it so the test can finish: this is the drain the wedged renderer
+    // never performed. `pop` signals `cond_not_full` for us.
+    _ = q.pop();
+    thread.join();
+    try testing.expect(blocker.returned.load(.acquire));
+}
