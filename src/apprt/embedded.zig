@@ -2171,10 +2171,31 @@ pub const CAPI = struct {
     const Darwin = struct {
         export fn ghostty_surface_set_display_id(ptr: *Surface, display_id: u32) void {
             const surface = &ptr.core_surface;
-            _ = surface.renderer_thread.mailbox.push(
+
+            // This is called from the embedder's UI thread, during view attach and
+            // layout. The renderer mailbox is a bounded blocking queue, so a
+            // `.forever` push here hands the UI thread's liveness to the renderer
+            // thread: if the renderer stops draining, the queue fills and the UI
+            // thread parks in a futex wait with no timeout and never comes back.
+            // That has been observed in the field as a permanent beachball with the
+            // main thread wedged inside this call for hours.
+            //
+            // Wake the renderer first so a merely-backed-up queue gets a chance to
+            // drain, then push without blocking. The display id is an idempotent
+            // hint that the embedder re-asserts on attach, focus gain and screen
+            // change, so dropping one under mailbox pressure is recoverable —
+            // deadlocking the UI thread is not.
+            surface.renderer_thread.wakeup.notify() catch {};
+            if (surface.renderer_thread.mailbox.push(
                 .{ .macos_display_id = display_id },
-                .{ .forever = {} },
-            );
+                .{ .instant = {} },
+            ) == 0) {
+                log.warn(
+                    "renderer mailbox full, dropping display id update id={}",
+                    .{display_id},
+                );
+                return;
+            }
             surface.renderer_thread.wakeup.notify() catch {};
         }
 
