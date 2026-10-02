@@ -8,9 +8,9 @@
         // Zig libs
 
         .libxev = .{
-            // mitchellh/libxev
-            .url = "https://deps.files.ghostty.org/libxev-34fa50878aec6e5fa8f532867001ab3c36fae23e.tar.gz",
-            .hash = "libxev-0.0.0-86vtc4IcEwCqEYxEYoN_3KXmc6A9VLcm22aVImfvecYs",
+            // mitchellh/libxev + C11-294 queued-write backpressure fix; see vendor/libxev-c11.
+            .url = "https://raw.githubusercontent.com/Stage-11-Agentics/ghostty/b6b0522c9df5431531d235b58217b72ffbd9b011/vendor/libxev-c11/libxev-c11-34fa50878aec6e5fa8f532867001ab3c36fae23e.tar.gz",
+            .hash = "libxev-0.0.0-86vtc1gfEwBe_o-T4bw-EOeLvwBCbq6vluWtfmj_crfh",
             .lazy = true,
         },
         .vaxis = .{
