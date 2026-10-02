@@ -1135,6 +1135,22 @@ const Subprocess = struct {
         if (self.process) |*process| {
             switch (process.*) {
                 .fork_exec => |*cmd| {
+                    if (comptime builtin.os.tag != .windows) {
+                        if (close_pty) {
+                            // The IO thread is joined by main during surface
+                            // free. Transfer only numeric ownership to a reaper;
+                            // no command, PTY, or surface storage may escape.
+                            const pid = cmd.pid;
+                            self.process = null;
+                            if (pid) |child| (DetachedShutdown{
+                                .primary_pgid = child,
+                                .foreground_pgid = foreground_process_group_id,
+                                .direct_child_pid = child,
+                                .timeouts = timeouts,
+                            }).start();
+                            return;
+                        }
+                    }
                     // Note: this will also wait for the command to exit, so
                     // DO NOT call cmd.wait.
                     killCommandWithTimeouts(
@@ -1158,8 +1174,17 @@ const Subprocess = struct {
             // group freshly observed through this retained PTY is the only
             // group identity that remains attributable to this subprocess.
             if (foreground_process_group_id) |pgid| {
-                killProcessGroupWithTimeouts(pgid, null, timeouts) catch |err|
-                    log.err("error stopping foreground process group: {}", .{err});
+                if (close_pty) {
+                    (DetachedShutdown{
+                        .primary_pgid = pgid,
+                        .foreground_pgid = null,
+                        .direct_child_pid = null,
+                        .timeouts = timeouts,
+                    }).start();
+                } else {
+                    killProcessGroupWithTimeouts(pgid, null, timeouts) catch |err|
+                        log.err("error stopping foreground process group: {}", .{err});
+                }
             }
         }
 
@@ -1233,6 +1258,37 @@ const Subprocess = struct {
         sigterm_grace: u64 = 250 * std.time.ns_per_ms,
         sigkill_grace: u64 = 3 * std.time.ns_per_s,
         poll_interval: u64 = 10 * std.time.ns_per_ms,
+    };
+
+    /// Entire detached-worker state, copied into the new thread's allocation.
+    /// No pointer here may refer to a dying surface, PTY, Command, or allocator.
+    const DetachedShutdown = struct {
+        primary_pgid: c.pid_t,
+        foreground_pgid: ?c.pid_t,
+        direct_child_pid: ?c.pid_t,
+        timeouts: KillTimeouts,
+
+        fn start(self: DetachedShutdown) void {
+            const thread = std.Thread.spawn(.{}, run, .{self}) catch |err| {
+                // Resource exhaustion must not abandon our waitable child or
+                // silently leak its group. This exceptional fallback retains
+                // the bounded synchronous cleanup, and explicitly diagnoses
+                // the loss of nonblocking close behavior.
+                log.err("unable to spawn child reaper; stopping synchronously: {}", .{err});
+                self.run();
+                return;
+            };
+            thread.detach();
+        }
+
+        fn run(self: DetachedShutdown) void {
+            killProcessGroupsWithTimeouts(
+                self.primary_pgid,
+                self.foreground_pgid,
+                self.direct_child_pid,
+                self.timeouts,
+            ) catch |err| log.err("error stopping detached process groups: {}", .{err});
+        }
     };
 
     const KillPhase = enum { sighup, sigterm, sigkill };
@@ -1818,6 +1874,54 @@ test "subprocess shutdown bounds ignored signals and pre-setsid child" {
             .sigkill_grace = 500 * std.time.ns_per_ms,
         });
         try std.testing.expect(timer.read() < std.time.ns_per_s);
+        try fixture.expectReaped();
+    }
+}
+
+test "cancelled subprocess close returns before grace and detached worker reaps" {
+    if (comptime builtin.os.tag == .windows or builtin.os.tag == .ios) return error.SkipZigTest;
+    const testing = std.testing;
+    const c = Subprocess.c;
+    for ([_]ShutdownFixture.Mode{ .ignores_hup, .ignores_both }) |mode| {
+        const fixture = try ShutdownFixture.start(mode);
+        defer fixture.deinit();
+        var command: Command = undefined;
+        command.pid = fixture.pid;
+        var subprocess: Subprocess = undefined;
+        subprocess.stopped = false;
+        subprocess.pty = null;
+        subprocess.process = .{ .fork_exec = command };
+
+        var timer = try std.time.Timer.start();
+        subprocess.stopWithOptions(.{
+            .sighup_grace = 750 * std.time.ns_per_ms,
+            .sigterm_grace = 750 * std.time.ns_per_ms,
+            .sigkill_grace = 750 * std.time.ns_per_ms,
+        }, true);
+        const return_ns = timer.read();
+        const ownership_cleared = subprocess.stopped and
+            subprocess.process == null and subprocess.pty == null;
+        // Model destruction immediately after the IO join. The reaper must
+        // not retain even a read-only pointer to either of these owners.
+        subprocess = undefined;
+        command = undefined;
+
+        // Do not waitpid here: consuming the status would hide a reaper bug.
+        // Signal zero also observes zombies, so disappearance means the worker
+        // reaped the child. Wait before assertions/fixture cleanup to avoid
+        // racing the detached worker on a failure path.
+        var disappeared = false;
+        while (timer.read() < 3 * std.time.ns_per_s) {
+            const result = c.kill(fixture.pid, 0);
+            if (result < 0 and posix.errno(result) == .SRCH) {
+                disappeared = true;
+                break;
+            }
+            std.Thread.sleep(10 * std.time.ns_per_ms);
+        }
+        try testing.expect(ownership_cleared);
+        try testing.expect(return_ns < 250 * std.time.ns_per_ms);
+        try testing.expect(disappeared);
         try fixture.expectReaped();
     }
 }

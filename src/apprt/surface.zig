@@ -154,6 +154,8 @@ pub const Mailbox = struct {
         // Surface message sending is actually implemented on the app
         // thread, so we have to rewrap the message with our surface
         // pointer and send it to the app thread.
+        // Main joins producer threads during teardown, so their indefinite
+        // app-mailbox waits must escape when surface cancellation is published.
         if (timeout == .forever) return self.pushCancelable(msg, &self.surface.stopping);
         return self.app.push(.{
             .surface_message = .{
