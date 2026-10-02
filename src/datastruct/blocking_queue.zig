@@ -52,6 +52,12 @@ pub fn BlockingQueue(
             ns: u64,
         };
 
+        // Only main-thread producers spill when the ring is full. Workers keep
+        // bounded backpressure. Ring entries always precede the FIFO spill.
+        alloc: Allocator = std.heap.page_allocator,
+        spill: std.ArrayListUnmanaged(T) = .{},
+        spill_read: usize = 0,
+
         /// Our data. The values are undefined until they are written.
         data: [bounds]T = undefined,
 
@@ -76,6 +82,7 @@ pub fn BlockingQueue(
             errdefer alloc.destroy(ptr);
 
             ptr.* = .{
+                .alloc = alloc,
                 .data = undefined,
                 .len = 0,
                 .write = 0,
@@ -91,8 +98,58 @@ pub fn BlockingQueue(
         /// Free all the resources for this queue. This should only be
         /// called once all producers and consumers have quit.
         pub fn destroy(self: *Self, alloc: Allocator) void {
+            self.deinitStorage();
             self.* = undefined;
             alloc.destroy(self);
+        }
+
+        /// For queues embedded by value, after all producers have stopped.
+        pub fn deinitStorage(self: *Self) void {
+            self.spill.deinit(self.alloc);
+        }
+
+        pub fn count(self: *Self) Size {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            return self.countLocked();
+        }
+
+        fn countLocked(self: *Self) Size {
+            return self.len + @as(Size, @intCast(self.spill.items.len - self.spill_read));
+        }
+
+        /// Ordered publication from a thread which must never wait for the
+        /// consumer (notably the app thread). Ownership transfers on success.
+        pub fn pushNonBlocking(self: *Self, value: T) Allocator.Error!Size {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            if (self.full()) {
+                // Reclaim a consumed prefix before growing. A continuously
+                // nonempty spill must use memory proportional to backlog,
+                // not all messages ever sent through it.
+                if (self.spill.items.len == self.spill.capacity and self.spill_read > 0) {
+                    const pending = self.spill.items.len - self.spill_read;
+                    std.mem.copyForwards(T, self.spill.items[0..pending], self.spill.items[self.spill_read..]);
+                    self.spill.items.len = pending;
+                    self.spill_read = 0;
+                }
+                try self.spill.append(self.alloc, value);
+            } else {
+                self.data[self.write] = value;
+                self.write = (self.write + 1) % bounds;
+                self.len += 1;
+            }
+            return self.countLocked();
+        }
+
+        /// A dying producer must escape even if its consumer is already joined.
+        /// A live producer keeps retrying; transient wakeups cannot lose a message.
+        pub fn pushCancelable(self: *Self, value: T, stop: *const std.atomic.Value(bool)) Size {
+            while (!stop.load(.acquire)) {
+                const result = self.push(value, .{ .ns = 50 * std.time.ns_per_ms });
+                if (result > 0) return result;
+            }
+            return 0;
         }
 
         /// Push a value to the queue. This returns the total size of the
@@ -140,20 +197,26 @@ pub fn BlockingQueue(
             self.mutex.lock();
             defer self.mutex.unlock();
 
-            // If we're empty we have nothing
-            if (self.len == 0) return null;
+            return self.popLocked();
+        }
 
-            // Get the index we're going to read data from and do some
-            // accounting. We don't copy the value here to avoid copying twice.
-            const n = self.read;
-            self.read += 1;
-            if (self.read >= bounds) self.read -= bounds;
-            self.len -= 1;
-
-            // If we have consumers waiting on a full queue, notify.
+        fn popLocked(self: *Self) ?T {
+            const value = if (self.len > 0) ring: {
+                const n = self.read;
+                self.read = (self.read + 1) % bounds;
+                self.len -= 1;
+                break :ring self.data[n];
+            } else if (self.spill_read < self.spill.items.len) spill: {
+                const value = self.spill.items[self.spill_read];
+                self.spill_read += 1;
+                if (self.spill_read == self.spill.items.len) {
+                    self.spill.clearRetainingCapacity();
+                    self.spill_read = 0;
+                }
+                break :spill value;
+            } else return null;
             if (self.not_full_waiters > 0) self.cond_not_full.signal();
-
-            return self.data[n];
+            return value;
         }
 
         /// Pop all values from the queue. This will hold the big mutex
@@ -169,15 +232,7 @@ pub fn BlockingQueue(
             queue: *Self,
 
             pub fn next(self: *DrainIterator) ?T {
-                if (self.queue.len == 0) return null;
-
-                // Read and account
-                const n = self.queue.read;
-                self.queue.read += 1;
-                if (self.queue.read >= bounds) self.queue.read -= bounds;
-                self.queue.len -= 1;
-
-                return self.queue.data[n];
+                return self.queue.popLocked();
             }
 
             pub fn deinit(self: *DrainIterator) void {
@@ -192,7 +247,7 @@ pub fn BlockingQueue(
         /// Returns true if the queue is full. This is not public because
         /// it requires the lock to be held.
         inline fn full(self: *Self) bool {
-            return self.len == bounds;
+            return self.len == bounds or self.spill_read < self.spill.items.len;
         }
     };
 }
@@ -295,4 +350,64 @@ test "forever push on a full queue blocks its caller; instant does not" {
     _ = q.pop();
     thread.join();
     try testing.expect(blocker.returned.load(.acquire));
+}
+
+test "main spill preserves order across ring reuse and bounded turns" {
+    const Q = BlockingQueue(u64, 2);
+    const q = try Q.create(std.testing.allocator);
+    defer q.destroy(std.testing.allocator);
+    _ = q.push(1, .instant);
+    _ = q.push(2, .instant);
+    _ = try q.pushNonBlocking(3);
+    const turn = q.count();
+    try std.testing.expectEqual(@as(Q.Size, 3), turn);
+    try std.testing.expectEqual(@as(?u64, 1), q.pop());
+    _ = try q.pushNonBlocking(4);
+    try std.testing.expectEqual(@as(Q.Size, 0), q.push(5, .instant));
+    try std.testing.expectEqual(@as(?u64, 2), q.pop());
+    try std.testing.expectEqual(@as(?u64, 3), q.pop());
+    try std.testing.expectEqual(@as(Q.Size, 1), q.count());
+    try std.testing.expectEqual(@as(?u64, 4), q.pop());
+    _ = q.push(5, .instant);
+    try std.testing.expectEqual(@as(?u64, 5), q.pop());
+}
+
+test "saturated producer exits on cancellation without consumer progress" {
+    const Q = BlockingQueue(u64, 1);
+    const q = try Q.create(std.testing.allocator);
+    defer q.destroy(std.testing.allocator);
+    _ = q.push(1, .instant);
+    var stop = std.atomic.Value(bool).init(false);
+    var result: Q.Size = 99;
+    const Worker = struct {
+        fn run(queue: *Q, cancelled: *std.atomic.Value(bool), out: *Q.Size) void {
+            out.* = queue.pushCancelable(2, cancelled);
+        }
+    };
+    const worker = try std.Thread.spawn(.{}, Worker.run, .{ q, &stop, &result });
+    std.Thread.sleep(10 * std.time.ns_per_ms);
+    stop.store(true, .release);
+    worker.join();
+    try std.testing.expectEqual(@as(Q.Size, 0), result);
+    try std.testing.expectEqual(@as(?u64, 1), q.pop());
+    try std.testing.expectEqual(@as(?u64, null), q.pop());
+}
+
+test "steady spill backlog reuses consumed storage" {
+    const Q = BlockingQueue(u64, 2);
+    const q = try Q.create(std.testing.allocator);
+    defer q.destroy(std.testing.allocator);
+    _ = q.push(0, .instant);
+    _ = q.push(1, .instant);
+    _ = try q.pushNonBlocking(2);
+    _ = try q.pushNonBlocking(3);
+    _ = q.pop();
+    _ = q.pop();
+    const capacity = q.spill.capacity;
+    for (2..10000) |i| {
+        try std.testing.expectEqual(@as(?u64, @intCast(i)), q.pop());
+        _ = try q.pushNonBlocking(@intCast(i + 2));
+    }
+    try std.testing.expectEqual(@as(Q.Size, 2), q.count());
+    try std.testing.expectEqual(capacity, q.spill.capacity);
 }

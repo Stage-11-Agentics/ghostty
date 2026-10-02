@@ -30,6 +30,7 @@ pub const Mailbox = union(enum) {
     spsc: struct {
         queue: *Queue,
         wakeup: xev.Async,
+        stop: ?*const std.atomic.Value(bool) = null,
     },
 
     /// Init the SPSC writer.
@@ -46,6 +47,7 @@ pub const Mailbox = union(enum) {
     pub fn deinit(self: *Mailbox, alloc: Allocator) void {
         switch (self.*) {
             .spsc => |*v| {
+                while (v.queue.pop()) |msg| msg.deinit();
                 v.queue.destroy(alloc);
                 v.wakeup.deinit();
             },
@@ -75,6 +77,7 @@ pub const Mailbox = union(enum) {
                 // lock so we need to unlock.
                 mb.wakeup.notify() catch |err| {
                     log.warn("failed to wake up writer, data will be dropped err={}", .{err});
+                    msg.deinit();
                     return;
                 };
 
@@ -89,9 +92,27 @@ pub const Mailbox = union(enum) {
                 // here.
                 if (mutex) |m| m.unlock();
                 defer if (mutex) |m| m.lock();
-                _ = mb.queue.push(msg, .{ .forever = {} });
+                if (mb.stop) |stop| {
+                    if (mb.queue.pushCancelable(msg, stop) == 0) msg.deinit();
+                } else {
+                    while (mb.queue.push(msg, .forever) == 0) {}
+                }
             },
         }
+    }
+
+    /// App-thread ordered sends cannot wait for a worker that may need main.
+    pub fn sendNonBlocking(self: *Mailbox, msg: termio.Message) void {
+        switch (self.*) {
+            .spsc => |*mb| {
+                _ = mb.queue.pushNonBlocking(msg) catch |err| {
+                    msg.deinit();
+                    log.err("unable to enqueue IO message err={}", .{err});
+                    return;
+                };
+            },
+        }
+        self.notify();
     }
 
     /// Notify that there are new messages. This may be a noop depending
@@ -104,3 +125,35 @@ pub const Mailbox = union(enum) {
         }
     }
 };
+
+test "cancelled IO publication disposes its owned write" {
+    const alloc = std.testing.allocator;
+    var mailbox = try Mailbox.initSPSC(alloc);
+    defer mailbox.deinit(alloc);
+    var stop = std.atomic.Value(bool).init(false);
+    mailbox.spsc.stop = &stop;
+    for (0..64) |_| _ = mailbox.spsc.queue.push(.{ .write_stable = "fill" }, .instant);
+    const payload = try alloc.dupe(u8, "owned paste payload");
+    const Worker = struct {
+        fn run(mb: *Mailbox, bytes: []u8) void {
+            mb.send(.{ .write_alloc = .{ .alloc = std.testing.allocator, .data = bytes } }, null);
+        }
+    };
+    const worker = try std.Thread.spawn(.{}, Worker.run, .{ &mailbox, payload });
+    std.Thread.sleep(10 * std.time.ns_per_ms);
+    stop.store(true, .release);
+    worker.join();
+    try std.testing.expectEqual(@as(Queue.Size, 64), mailbox.spsc.queue.count());
+    // testing.allocator asserts that the cancelled payload was freed exactly once.
+}
+
+test "IO spill shutdown frees accepted owned payloads" {
+    const alloc = std.testing.allocator;
+    var mailbox = try Mailbox.initSPSC(alloc);
+    defer mailbox.deinit(alloc);
+    for (0..64) |_| _ = mailbox.spsc.queue.push(.{ .write_stable = "fill" }, .instant);
+    const payload = try alloc.dupe(u8, "accepted paste payload");
+    mailbox.sendNonBlocking(.{ .write_alloc = .{ .alloc = alloc, .data = payload } });
+    try std.testing.expectEqual(@as(Queue.Size, 65), mailbox.spsc.queue.count());
+    // No consumer runs. Shutdown owns both the spill and its payload.
+}

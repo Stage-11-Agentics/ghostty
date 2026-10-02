@@ -317,6 +317,7 @@ pub fn init(self: *Termio, alloc: Allocator, opts: termio.Options) !void {
         .terminal_stream = .initAlloc(alloc, handler),
         .thread_enter_state = thread_enter_state,
     };
+    self.mailbox.spsc.stop = &opts.surface_mailbox.surface.stopping;
 }
 
 pub fn deinit(self: *Termio) void {
@@ -513,7 +514,7 @@ pub fn resize(
     }
 
     // Mail the renderer so that it can update the GPU and re-render
-    _ = self.renderer_mailbox.push(.{ .resize = size }, .{ .forever = {} });
+    _ = self.renderer_mailbox.pushCancelable(.{ .resize = size }, &self.surface_mailbox.surface.stopping);
     self.renderer_wakeup.notify() catch {};
 }
 

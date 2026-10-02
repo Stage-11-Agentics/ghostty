@@ -108,6 +108,15 @@ pub const Message = union(enum) {
     /// Selected search index change
     search_selected: ?usize,
 
+    /// Dispose an undelivered message; accepted messages belong to the consumer.
+    pub fn deinit(self: Message) void {
+        switch (self) {
+            .clipboard_write => |v| v.req.deinit(),
+            .pwd_change => |v| v.deinit(),
+            else => {},
+        }
+    }
+
     pub const ReportTitleStyle = enum {
         csi_21_t,
 
@@ -145,12 +154,28 @@ pub const Mailbox = struct {
         // Surface message sending is actually implemented on the app
         // thread, so we have to rewrap the message with our surface
         // pointer and send it to the app thread.
+        if (timeout == .forever) return self.pushCancelable(msg, &self.surface.stopping);
         return self.app.push(.{
             .surface_message = .{
                 .surface = self.surface,
                 .message = msg,
             },
         }, timeout);
+    }
+    pub fn pushNonBlocking(self: Mailbox, msg: Message) Allocator.Error!void {
+        _ = try self.app.mailbox.pushNonBlocking(.{
+            .surface_message = .{ .surface = self.surface, .message = msg },
+        });
+        self.app.rt_app.wakeup();
+    }
+
+    pub fn pushCancelable(self: Mailbox, msg: Message, stop: *const std.atomic.Value(bool)) App.Mailbox.Queue.Size {
+        const result = self.app.mailbox.pushCancelable(.{
+            .surface_message = .{ .surface = self.surface, .message = msg },
+        }, stop);
+        self.app.rt_app.wakeup();
+        if (result == 0) msg.deinit();
+        return result;
     }
 };
 

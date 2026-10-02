@@ -96,7 +96,7 @@ pub fn init(
     self.* = .{
         .alloc = alloc,
         .surfaces = .{},
-        .mailbox = .{},
+        .mailbox = .{ .alloc = alloc },
         .font_grid_set = font_grid_set,
         .config_conditional_state = .{},
     };
@@ -106,6 +106,11 @@ pub fn deinit(self: *App) void {
     // Clean up all our surfaces
     for (self.surfaces.items) |surface| surface.deinit();
     self.surfaces.deinit(self.alloc);
+    while (self.mailbox.pop()) |msg| {
+        if (msg == .surface_message) msg.surface_message.message.deinit();
+    }
+
+    self.mailbox.deinitStorage();
 
     // Clean up our font group cache
     // We should have zero items in the grid set at this point because
@@ -236,7 +241,11 @@ pub fn needsConfirmQuit(self: *const App) bool {
 
 /// Drain the mailbox.
 fn drainMailbox(self: *App, rt_app: *apprt.App) !void {
-    while (self.mailbox.pop()) |message| {
+    // Snapshot this turn: continuous producers must not monopolize main.
+    var remaining = self.mailbox.count();
+    defer if (self.mailbox.count() > 0) rt_app.wakeup();
+    while (remaining > 0) : (remaining -= 1) {
+        const message = self.mailbox.pop() orelse break;
         if (comptime std.log.logEnabled(.debug, .app)) {
             switch (message) {
                 // these tend to be way too verbose for normal debugging
@@ -510,6 +519,8 @@ fn surfaceMessage(self: *App, surface: *Surface, msg: apprt.surface.Message) !vo
     // a simple linear search here.
     if (self.hasSurface(surface)) {
         try surface.handleMessage(msg);
+    } else {
+        msg.deinit();
     }
 
     // Window was not found, it probably quit before we handled the message.

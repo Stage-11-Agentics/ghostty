@@ -119,6 +119,7 @@ pub fn deinit(self: *Thread) void {
     self.stop.deinit();
     self.loop.deinit();
     // Nothing can possibly access the mailbox anymore, destroy it.
+    while (self.mailbox.pop()) |msg| msg.deinit();
     self.mailbox.destroy(self.alloc);
 
     if (self.search) |*s| s.deinit();
@@ -179,6 +180,7 @@ fn threadMain_(self: *Thread) !void {
         // If our loop is canceled then we drain our messages and quit.
         if (self.loop.stopped()) {
             while (self.mailbox.pop()) |message| {
+                message.deinit();
                 log.debug("mailbox message ignored during shutdown={}", .{message});
             }
 
@@ -462,6 +464,12 @@ pub const Message = union(enum) {
 
     /// Select a search result.
     select: ScreenSearch.Select,
+    pub fn deinit(self: Message) void {
+        switch (self) {
+            .change_needle => |v| v.deinit(),
+            else => {},
+        }
+    }
 };
 
 /// Events that can be emitted from the search thread. The caller

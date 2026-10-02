@@ -260,3 +260,13 @@ test "encode strip multiple unsafe bytes" {
     const result = encode(data, .{ .bracketed = true });
     try testing.expectEqualStrings("   ", result[1]);
 }
+
+test "owned paste keeps one fence pair around sanitized multiline UTF-8" {
+    const alloc = std.testing.allocator;
+    const encoded = try encodeAlloc(alloc, "alpha\n\xe2\x98\x83\x1b[201~\n", .{ .bracketed = true });
+    defer alloc.free(encoded);
+    try std.testing.expectEqualStrings("\x1b[200~alpha\n\xe2\x98\x83 [201~\n\x1b[201~", encoded);
+    const plain = try encodeAlloc(alloc, "one\ntwo", .{ .bracketed = false });
+    defer alloc.free(plain);
+    try std.testing.expectEqualStrings("one\rtwo", plain);
+}

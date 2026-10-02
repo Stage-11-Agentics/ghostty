@@ -12,6 +12,7 @@ const apprt = @import("../apprt.zig");
 const configpkg = @import("../config.zig");
 const BlockingQueue = @import("../datastruct/main.zig").BlockingQueue;
 const App = @import("../App.zig");
+const lifecycle = @import("lifecycle.zig");
 
 const Allocator = std.mem.Allocator;
 const log = std.log.scoped(.renderer_thread);
@@ -90,6 +91,9 @@ app_mailbox: App.Mailbox,
 
 /// Configuration we need derived from the main config.
 config: DerivedConfig,
+
+/// Latest lifecycle values never wait for ordinary mailbox capacity.
+surface_state_requests: lifecycle.SurfaceStateRequests = .{},
 
 flags: packed struct {
     /// This is true when a blinking cursor should be visible and false
@@ -192,6 +196,12 @@ pub fn deinit(self: *Thread) void {
     self.loop.deinit();
 
     // Nothing can possibly access the mailbox anymore, destroy it.
+    while (self.mailbox.pop()) |msg| {
+        // Queued font transitions each own the prior key. Surface owns the
+        // final key and releases it after renderer teardown.
+        if (msg == .font_grid) msg.font_grid.set.deref(msg.font_grid.old_key);
+        msg.deinit();
+    }
     self.mailbox.destroy(self.alloc);
 }
 
@@ -345,148 +355,185 @@ fn drainMailbox(self: *Thread) !void {
         void;
     defer if (builtin.os.tag.isDarwin()) pool.deinit();
 
-    while (self.mailbox.pop()) |message| {
-        log.debug("mailbox message={}", .{message});
-        switch (message) {
-            .crash => @panic("crash request, crashing intentionally"),
+    try lifecycle.drainMailboxTurn(
+        self.mailbox,
+        self,
+        consumeMessage,
+        applyPendingSurfaceState,
+        continueMailboxDrain,
+    );
+}
 
-            .visible => |v| visible: {
-                // If our state didn't change we do nothing.
-                if (self.flags.visible == v) break :visible;
+fn continueMailboxDrain(self: *Thread) void {
+    self.wakeup.notify() catch |err|
+        log.warn("failed to continue renderer mailbox drain err={}", .{err});
+}
 
-                // Set our visible state
-                self.flags.visible = v;
+/// Lifecycle updates are applied even when an ordinary handler fails. Take
+/// each slot only when applying it so a failure cannot discard another slot.
+fn applyPendingSurfaceState(self: *Thread) void {
+    if (self.surface_state_requests.takeVisible()) |v| self.applyVisible(v);
+    if (self.surface_state_requests.takeFocused()) |v| {
+        self.applyFocused(v) catch |err|
+            log.warn("error applying renderer focus err={}", .{err});
+    }
+}
 
-                // Visibility affects our QoS class
-                self.setQosClass();
+fn consumeMessage(self: *Thread, message: rendererpkg.Message) !void {
+    log.debug("mailbox message={}", .{message});
+    switch (message) {
+        .crash => @panic("crash request, crashing intentionally"),
 
-                // If we became visible then we immediately rebuild cells
-                // (renderCallback skips updateFrame while invisible) and draw.
-                if (v) {
-                    self.renderer.updateFrame(
-                        self.state,
-                        self.flags.cursor_blink_visible,
-                    ) catch |err|
-                        log.warn("error rendering on visibility regain err={}", .{err});
-                    self.drawFrame(false);
-                }
+        .visible => |v| self.applyVisible(v),
 
-                // Notify the renderer so it can update any state.
-                self.renderer.setVisible(v);
+        .focus => |v| try self.applyFocused(v),
 
-                // Note that we're explicitly today not stopping any
-                // cursor timers, draw timers, etc. These things have very
-                // little resource cost and properly maintaining their active
-                // state across different transitions is going to be bug-prone,
-                // so its easier to just let them keep firing and have them
-                // check the visible state themselves to control their behavior.
-            },
+        .reset_cursor_blink => {
+            self.flags.cursor_blink_visible = true;
+            if (self.cursor_c.state() == .active) {
+                self.cursor_h.reset(
+                    &self.loop,
+                    &self.cursor_c,
+                    &self.cursor_c_cancel,
+                    cursorBlinkInterval(),
+                    Thread,
+                    self,
+                    cursorTimerCallback,
+                );
+            }
+        },
 
-            .focus => |v| focus: {
-                // If our state didn't change we do nothing.
-                if (self.flags.focused == v) break :focus;
+        .font_grid => |grid| {
+            self.renderer.setFontGrid(grid.grid);
+            grid.set.deref(grid.old_key);
+        },
 
-                // Set our state
-                self.flags.focused = v;
+        .resize => |v| self.renderer.setScreenSize(v),
 
-                // Focus affects our QoS class
-                self.setQosClass();
+        .change_config => |config| {
+            defer config.alloc.destroy(config.thread);
+            defer config.alloc.destroy(config.impl);
+            try self.changeConfig(config.thread);
+            try self.renderer.changeConfig(config.impl);
 
-                // Set it on the renderer
-                try self.renderer.setFocus(v);
+            // Stop and start the draw timer to capture the new
+            // hasAnimations value.
+            self.syncDrawTimer();
+        },
 
-                // We always resync our draw timer (may disable it)
-                self.syncDrawTimer();
+        .search_viewport_matches => |v| {
+            // Note we don't free the new value because we expect our
+            // allocators to match.
+            if (self.renderer.search_matches) |*m| m.arena.deinit();
+            self.renderer.search_matches = v;
+            self.renderer.search_matches_dirty = true;
+        },
 
-                if (!v) {
-                    // If we're not focused, then we stop the cursor blink
-                    if (self.cursor_c.state() == .active and
-                        self.cursor_c_cancel.state() == .dead)
-                    {
-                        self.cursor_h.cancel(
-                            &self.loop,
-                            &self.cursor_c,
-                            &self.cursor_c_cancel,
-                            void,
-                            null,
-                            cursorCancelCallback,
-                        );
-                    }
-                } else {
-                    // If we're focused, we immediately show the cursor again
-                    // and then restart the timer.
-                    if (self.cursor_c.state() != .active) {
-                        self.flags.cursor_blink_visible = true;
-                        self.cursor_h.run(
-                            &self.loop,
-                            &self.cursor_c,
-                            cursorBlinkInterval(),
-                            Thread,
-                            self,
-                            cursorTimerCallback,
-                        );
-                    }
-                }
-            },
+        .search_selected_match => |v| {
+            // Note we don't free the new value because we expect our
+            // allocators to match.
+            if (self.renderer.search_selected_match) |*m| m.arena.deinit();
+            self.renderer.search_selected_match = v;
+            self.renderer.search_matches_dirty = true;
+        },
 
-            .reset_cursor_blink => {
-                self.flags.cursor_blink_visible = true;
-                if (self.cursor_c.state() == .active) {
-                    self.cursor_h.reset(
-                        &self.loop,
-                        &self.cursor_c,
-                        &self.cursor_c_cancel,
-                        cursorBlinkInterval(),
-                        Thread,
-                        self,
-                        cursorTimerCallback,
-                    );
-                }
-            },
+        .inspector => |v| {
+            self.flags.has_inspector = v;
+        },
 
-            .font_grid => |grid| {
-                self.renderer.setFontGrid(grid.grid);
-                grid.set.deref(grid.old_key);
-            },
+        .macos_display_id => |v| {
+            if (@hasDecl(rendererpkg.Renderer, "setMacOSDisplayID")) {
+                try self.renderer.setMacOSDisplayID(v);
+            }
+        },
+    }
+}
 
-            .resize => |v| self.renderer.setScreenSize(v),
+/// Publish without waiting for mailbox capacity. Callers notify wakeup after
+/// publishing; a racing publication is taken now or retained for the next turn.
+pub fn publishVisible(self: *Thread, value: bool) void {
+    self.surface_state_requests.publishVisible(value);
+}
 
-            .change_config => |config| {
-                defer config.alloc.destroy(config.thread);
-                defer config.alloc.destroy(config.impl);
-                try self.changeConfig(config.thread);
-                try self.renderer.changeConfig(config.impl);
+pub fn publishFocused(self: *Thread, value: bool) void {
+    self.surface_state_requests.publishFocused(value);
+}
 
-                // Stop and start the draw timer to capture the new
-                // hasAnimations value.
-                self.syncDrawTimer();
-            },
+fn applyVisible(self: *Thread, v: bool) void {
+    // If our state didn't change we do nothing.
+    if (self.flags.visible == v) return;
 
-            .search_viewport_matches => |v| {
-                // Note we don't free the new value because we expect our
-                // allocators to match.
-                if (self.renderer.search_matches) |*m| m.arena.deinit();
-                self.renderer.search_matches = v;
-                self.renderer.search_matches_dirty = true;
-            },
+    // Set our visible state
+    self.flags.visible = v;
 
-            .search_selected_match => |v| {
-                // Note we don't free the new value because we expect our
-                // allocators to match.
-                if (self.renderer.search_selected_match) |*m| m.arena.deinit();
-                self.renderer.search_selected_match = v;
-                self.renderer.search_matches_dirty = true;
-            },
+    // Visibility affects our QoS class
+    self.setQosClass();
 
-            .inspector => |v| {
-                self.flags.has_inspector = v;
-            },
+    // If we became visible then we immediately rebuild cells
+    // (renderCallback skips updateFrame while invisible) and draw.
+    if (v) {
+        self.renderer.updateFrame(
+            self.state,
+            self.flags.cursor_blink_visible,
+        ) catch |err|
+            log.warn("error rendering on visibility regain err={}", .{err});
+        self.drawFrame(false);
+    }
 
-            .macos_display_id => |v| {
-                if (@hasDecl(rendererpkg.Renderer, "setMacOSDisplayID")) {
-                    try self.renderer.setMacOSDisplayID(v);
-                }
-            },
+    // Notify the renderer so it can update any state.
+    self.renderer.setVisible(v);
+
+    // Note that we're explicitly today not stopping any
+    // cursor timers, draw timers, etc. These things have very
+    // little resource cost and properly maintaining their active
+    // state across different transitions is going to be bug-prone,
+    // so its easier to just let them keep firing and have them
+    // check the visible state themselves to control their behavior.
+}
+
+fn applyFocused(self: *Thread, v: bool) !void {
+    // If our state didn't change we do nothing.
+    if (self.flags.focused == v) return;
+
+    // Set our state
+    self.flags.focused = v;
+
+    // Focus affects our QoS class
+    self.setQosClass();
+
+    // Set it on the renderer
+    try self.renderer.setFocus(v);
+
+    // We always resync our draw timer (may disable it)
+    self.syncDrawTimer();
+
+    if (!v) {
+        // If we're not focused, then we stop the cursor blink
+        if (self.cursor_c.state() == .active and
+            self.cursor_c_cancel.state() == .dead)
+        {
+            self.cursor_h.cancel(
+                &self.loop,
+                &self.cursor_c,
+                &self.cursor_c_cancel,
+                void,
+                null,
+                cursorCancelCallback,
+            );
+        }
+    } else {
+        // If we're focused, we immediately show the cursor again
+        // and then restart the timer.
+        if (self.cursor_c.state() != .active) {
+            self.flags.cursor_blink_visible = true;
+            self.cursor_h.run(
+                &self.loop,
+                &self.cursor_c,
+                cursorBlinkInterval(),
+                Thread,
+                self,
+                cursorTimerCallback,
+            );
         }
     }
 }
@@ -613,7 +660,7 @@ fn renderCallback(
     };
 
     // If we're not visible there's no point spending CPU rebuilding cells —
-    // we'll catch up when the .visible mailbox message flips us back on.
+    // we'll catch up when the latest visibility request flips us back on.
     if (!t.flags.visible) return .disarm;
 
     // Update our frame data
@@ -722,4 +769,8 @@ fn cursorBlinkInterval() u64 {
     }
 
     return CURSOR_BLINK_INTERVAL;
+}
+
+test {
+    _ = lifecycle;
 }

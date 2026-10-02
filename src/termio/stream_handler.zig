@@ -169,7 +169,7 @@ pub const StreamHandler = struct {
                 .{err},
             );
         };
-        _ = self.renderer_mailbox.push(msg, .{ .forever = {} });
+        if (self.renderer_mailbox.pushCancelable(msg, &self.surface_mailbox.surface.stopping) == 0) msg.deinit();
     }
 
     pub fn vt(

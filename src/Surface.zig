@@ -162,6 +162,10 @@ readonly: bool = false,
 /// the wall clock time that has elapsed between timestamps.
 command_timer: ?std.time.Instant = null,
 
+/// Published before any worker join, and kept alive through renderer teardown.
+stopping: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+search_stopping: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
 /// Search state
 search: ?Search = null,
 
@@ -806,6 +810,8 @@ pub fn init(
 }
 
 pub fn deinit(self: *Surface) void {
+    self.stopping.store(true, .release);
+    self.search_stopping.store(true, .release);
     // Stop search thread
     if (self.search) |*s| s.deinit();
 
@@ -828,8 +834,10 @@ pub fn deinit(self: *Surface) void {
 
     // We need to deinit AFTER everything is stopped, since there are
     // shared values between the two threads.
-    self.renderer_thread.deinit();
+    // The renderer may still reference a font grid superseded by a queued
+    // message. Release its resources before disposing those pending keys.
     self.renderer.deinit();
+    self.renderer_thread.deinit();
     self.io_thread.deinit();
     self.io.deinit();
 
@@ -883,13 +891,17 @@ fn queueIo(
             .write_small,
             .write_stable,
             .write_alloc,
-            => return,
+            => {
+                msg.deinit();
+                return;
+            },
 
             else => {},
         }
     }
 
-    self.io.queueMessage(msg, mutex);
+    _ = mutex; // Sending never waits for the IO worker or renderer mutex.
+    self.io.mailbox.sendNonBlocking(msg);
 }
 
 /// Forces the surface to render. This is useful for when the surface
@@ -899,6 +911,32 @@ pub fn draw(self: *Surface) !void {
     // Renderers are required to support `drawFrame` being called from
     // the main thread, so that they can update contents during resize.
     try self.renderer.drawFrame(true);
+}
+
+fn queueRendererMain(self: *Surface, msg: rendererpkg.Message) void {
+    _ = self.renderer_thread.mailbox.pushNonBlocking(msg) catch |err| {
+        msg.deinit();
+        log.err("unable to enqueue renderer message err={}", .{err});
+        return;
+    };
+}
+
+fn stopSearch(self: *Surface) void {
+    const search = if (self.search) |*v| v else return;
+    self.search_stopping.store(true, .release);
+    search.deinit();
+    self.search = null;
+    self.queueRendererMain(.{ .search_selected_match = null });
+    self.queueRendererMain(.{ .search_viewport_matches = .{
+        .arena = .init(self.alloc),
+        .matches = &.{},
+    } });
+    self.renderer_thread.wakeup.notify() catch {};
+    // FIFO resets follow any result already queued by the joined worker.
+    self.surfaceMailbox().pushNonBlocking(.{ .search_total = null }) catch |err|
+        log.err("unable to reset search total err={}", .{err});
+    self.surfaceMailbox().pushNonBlocking(.{ .search_selected = null }) catch |err|
+        log.err("unable to reset selected search result err={}", .{err});
 }
 
 /// Activate the inspector. This will begin collecting inspection data.
@@ -924,7 +962,7 @@ pub fn activateInspector(self: *Surface) !void {
     }
 
     // Notify our components we have an inspector active
-    _ = self.renderer_thread.mailbox.push(.{ .inspector = true }, .{ .forever = {} });
+    self.queueRendererMain(.{ .inspector = true });
     self.queueIo(.{ .inspector = true }, .unlocked);
 }
 
@@ -941,7 +979,7 @@ pub fn deactivateInspector(self: *Surface) void {
     }
 
     // Notify our components we have deactivated inspector
-    _ = self.renderer_thread.mailbox.push(.{ .inspector = false }, .{ .forever = {} });
+    self.queueRendererMain(.{ .inspector = false });
     self.queueIo(.{ .inspector = false }, .unlocked);
 
     // Deinit the inspector
@@ -1446,14 +1484,16 @@ fn searchCallback_(
             const matches = try alloc.dupe(terminal.highlight.Flattened, matches_unowned);
             for (matches) |*m| m.* = try m.clone(alloc);
 
-            _ = self.renderer_thread.mailbox.push(
+            const queued = self.renderer_thread.mailbox.pushCancelable(
                 .{ .search_viewport_matches = .{
                     .arena = arena,
                     .matches = matches,
                 } },
-                .forever,
+                &self.search_stopping,
             );
-            try self.renderer_thread.wakeup.notify();
+            if (queued == 0) return error.SearchStopped;
+            self.renderer_thread.wakeup.notify() catch |err|
+                log.warn("failed to notify renderer of search update err={}", .{err});
         },
 
         .selected_match => |selected_| {
@@ -1464,68 +1504,47 @@ fn searchCallback_(
                 const alloc = arena.allocator();
                 const match = try sel.highlight.clone(alloc);
 
-                _ = self.renderer_thread.mailbox.push(
+                const queued = self.renderer_thread.mailbox.pushCancelable(
                     .{ .search_selected_match = .{
                         .arena = arena,
                         .match = match,
                     } },
-                    .forever,
+                    &self.search_stopping,
                 );
+                if (queued == 0) return error.SearchStopped;
 
                 // Send the selected index to the surface mailbox
-                _ = self.surfaceMailbox().push(
+                _ = self.surfaceMailbox().pushCancelable(
                     .{ .search_selected = sel.idx },
-                    .forever,
+                    &self.search_stopping,
                 );
             } else {
                 // Reset our selected match
-                _ = self.renderer_thread.mailbox.push(
+                _ = self.renderer_thread.mailbox.pushCancelable(
                     .{ .search_selected_match = null },
-                    .forever,
+                    &self.search_stopping,
                 );
 
                 // Reset the selected index
-                _ = self.surfaceMailbox().push(
+                _ = self.surfaceMailbox().pushCancelable(
                     .{ .search_selected = null },
-                    .forever,
+                    &self.search_stopping,
                 );
             }
 
-            try self.renderer_thread.wakeup.notify();
+            self.renderer_thread.wakeup.notify() catch |err|
+                log.warn("failed to notify renderer of search update err={}", .{err});
         },
 
         .total_matches => |total| {
-            _ = self.surfaceMailbox().push(
+            _ = self.surfaceMailbox().pushCancelable(
                 .{ .search_total = total },
-                .forever,
+                &self.search_stopping,
             );
         },
 
         // When we quit, tell our renderer to reset any search state.
-        .quit => {
-            _ = self.renderer_thread.mailbox.push(
-                .{ .search_selected_match = null },
-                .forever,
-            );
-            _ = self.renderer_thread.mailbox.push(
-                .{ .search_viewport_matches = .{
-                    .arena = .init(self.alloc),
-                    .matches = &.{},
-                } },
-                .forever,
-            );
-            try self.renderer_thread.wakeup.notify();
-
-            // Reset search totals in the surface
-            _ = self.surfaceMailbox().push(
-                .{ .search_total = null },
-                .forever,
-            );
-            _ = self.surfaceMailbox().push(
-                .{ .search_selected = null },
-                .forever,
-            );
-        },
+        .quit => {},
 
         // Unhandled, so far.
         .complete => {},
@@ -1797,7 +1816,7 @@ pub fn updateConfig(
     termio_config_ptr.* = try termio.Termio.DerivedConfig.init(self.alloc, config);
     errdefer termio_config_ptr.deinit();
 
-    _ = self.renderer_thread.mailbox.push(renderer_message, .{ .forever = {} });
+    _ = try self.renderer_thread.mailbox.pushNonBlocking(renderer_message);
     self.queueIo(.{
         .change_config = .{
             .alloc = self.alloc,
@@ -2464,14 +2483,14 @@ pub fn setFontSize(self: *Surface, size: font.face.DesiredSize) !void {
 
     // Notify our render thread of the new font stack. The renderer
     // MUST accept the new font grid and deref the old.
-    _ = self.renderer_thread.mailbox.push(.{
+    _ = try self.renderer_thread.mailbox.pushNonBlocking(.{
         .font_grid = .{
             .grid = font_grid,
             .set = &self.app.font_grid_set,
             .old_key = self.font_grid_key,
             .new_key = font_grid_key,
         },
-    }, .{ .forever = {} });
+    });
 
     // Once we've sent the key we can replace our key
     self.font_grid_key = font_grid_key;
@@ -3329,9 +3348,7 @@ pub fn occlusionCallback(self: *Surface, visible: bool) !void {
     crash.sentry.thread_state = self.crashThreadState();
     defer crash.sentry.thread_state = null;
 
-    _ = self.renderer_thread.mailbox.push(.{
-        .visible = visible,
-    }, .{ .forever = {} });
+    self.renderer_thread.publishVisible(visible);
     try self.queueRender();
 }
 
@@ -3345,9 +3362,7 @@ pub fn focusCallback(self: *Surface, focused: bool) !void {
     self.focused = focused;
 
     // Notify our render thread of the new state
-    _ = self.renderer_thread.mailbox.push(.{
-        .focus = focused,
-    }, .{ .forever = {} });
+    self.renderer_thread.publishFocused(focused);
 
     if (focused) {
         // Notify our app if we gained focus.
@@ -5336,10 +5351,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             // that GUIs can clean up stale stuff.
             const performed = self.search != null;
 
-            if (self.search) |*s| {
-                s.deinit();
-                self.search = null;
-            }
+            self.stopSearch();
 
             _ = try self.rt_app.performAction(
                 .{ .surface = self },
@@ -5358,6 +5370,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
 
                 // We need to assign directly to self.search because we need
                 // a stable pointer back to the thread state.
+                self.search_stopping.store(false, .release);
                 self.search = .{
                     .state = try .init(self.alloc, .{
                         .mutex = self.renderer_state.mutex,
@@ -5382,29 +5395,23 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
 
             // Zero-length text means stop searching.
             if (text.len == 0) {
-                s.deinit();
-                self.search = null;
+                self.stopSearch();
                 break :search;
             }
 
-            _ = s.state.mailbox.push(
-                .{ .change_needle = try .init(
-                    self.alloc,
-                    text,
-                ) },
-                .forever,
-            );
+            const needle = try terminal.search.Thread.Message.WriteReq.init(self.alloc, text);
+            errdefer needle.deinit();
+            _ = try s.state.mailbox.pushNonBlocking(.{ .change_needle = needle });
             s.state.wakeup.notify() catch {};
         },
 
         .navigate_search => |nav| {
             const s: *Search = if (self.search) |*s| s else return false;
-            _ = s.state.mailbox.push(
+            _ = try s.state.mailbox.pushNonBlocking(
                 .{ .select = switch (nav) {
                     .next => .next,
                     .previous => .prev,
                 } },
-                .forever,
             );
             s.state.wakeup.notify() catch {};
         },
@@ -5964,7 +5971,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             .main => @panic("crash binding action, crashing intentionally"),
 
             .render => {
-                _ = self.renderer_thread.mailbox.push(.{ .crash = {} }, .{ .forever = {} });
+                self.queueRendererMain(.{ .crash = {} });
                 self.queueRender() catch |err| {
                     // Not a big deal if this fails.
                     log.warn("failed to notify renderer of crash message err={}", .{err});

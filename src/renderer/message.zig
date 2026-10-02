@@ -105,6 +105,14 @@ pub const Message = union(enum) {
                 v.alloc.destroy(v.thread);
             },
 
+            .search_viewport_matches => |v| {
+                var arena = v.arena;
+                arena.deinit();
+            },
+            .search_selected_match => |v| if (v) |m| {
+                var arena = m.arena;
+                arena.deinit();
+            },
             else => {},
         }
     }
