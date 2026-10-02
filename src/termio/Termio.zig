@@ -426,7 +426,8 @@ pub inline fn queueWrite(
     try self.backend.queueWrite(self.alloc, td, data, linefeed);
 }
 
-/// Update the configuration.
+/// Update the configuration on the IO mailbox consumer. The stream handler
+/// may append ordered IO messages here, but must never wait on this mailbox.
 pub fn changeConfig(self: *Termio, td: *ThreadData, config: *DerivedConfig) !void {
     // The remainder of this function is modifying terminal state or
     // the read thread data, all of which requires holding the renderer
@@ -786,3 +787,107 @@ pub const ThreadData = struct {
         self.* = undefined;
     }
 };
+
+test "IO config change appends its report behind mailbox spill without self-wait" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var config = try configpkg.Config.default(alloc);
+    defer config.deinit();
+
+    // Use the real terminal, parser handler, and mailbox. No IO consumer runs
+    // concurrently: changeConfig below is the consumer handling its popped
+    // config message, so only a nonblocking self-publication can make progress.
+    var io: Termio = undefined;
+    io.alloc = alloc;
+    io.terminal = try terminalpkg.Terminal.init(alloc, .{ .cols = 4, .rows = 4 });
+    defer io.terminal.deinit(alloc);
+    io.config = try DerivedConfig.init(alloc, &config);
+    defer io.config.deinit();
+    io.mailbox = try termio.Mailbox.initSPSC(alloc);
+    defer io.mailbox.deinit(alloc);
+    var stop = std.atomic.Value(bool).init(false);
+    io.mailbox.spsc.stop = &stop;
+    var mutex: std.Thread.Mutex = .{};
+    var state: renderer.State = .{ .mutex = &mutex, .terminal = &io.terminal };
+    io.renderer_state = &state;
+    io.size = .{
+        .screen = .{ .width = 40, .height = 80 },
+        .cell = .{ .width = 10, .height = 20 },
+        .padding = .{},
+    };
+    io.terminal_stream = .initAlloc(alloc, .{
+        .alloc = alloc,
+        .size = &io.size,
+        .terminal = &io.terminal,
+        .termio_mailbox = &io.mailbox,
+        .renderer_state = &state,
+        .surface_mailbox = undefined,
+        .renderer_mailbox = undefined,
+        .renderer_wakeup = undefined,
+        .default_cursor_style = io.config.cursor_style,
+        .default_cursor_blink = io.config.cursor_blink,
+        .enquiry_response = io.config.enquiry_response,
+        .osc_color_report_format = io.config.osc_color_report_format,
+        .clipboard_write = io.config.clipboard_write,
+    });
+    defer io.terminal_stream.deinit();
+    var td: ThreadData = undefined;
+    td.backend = .{ .manual = .{} };
+
+    config.@"cursor-style" = .bar;
+    config.@"cursor-style-blink" = false;
+    config._conditional_state.theme = .light;
+    {
+        const derived = try alloc.create(DerivedConfig);
+        errdefer alloc.destroy(derived);
+        derived.* = try DerivedConfig.init(alloc, &config);
+        errdefer derived.deinit();
+        try testing.expectEqual(@as(usize, 1), io.mailbox.spsc.queue.push(.{
+            .change_config = .{ .alloc = alloc, .ptr = derived },
+        }, .instant));
+    }
+    for (0..63) |_| {
+        try testing.expect(io.mailbox.spsc.queue.push(.{ .write_stable = "ring" }, .instant) > 0);
+    }
+    io.mailbox.sendNonBlocking(.{ .write_stable = "spill" });
+    try testing.expectEqual(@as(usize, 65), io.mailbox.spsc.queue.count());
+
+    // A regressed blocking send gets cancelled after two seconds so this
+    // behavioral test fails instead of hanging the test process indefinitely.
+    var finished: std.Thread.ResetEvent = .{};
+    const watchdog = try std.Thread.spawn(.{}, struct {
+        fn run(done: *std.Thread.ResetEvent, cancelled: *std.atomic.Value(bool)) void {
+            done.timedWait(2 * std.time.ns_per_s) catch {
+                cancelled.store(true, .release);
+            };
+        }
+    }.run, .{ &finished, &stop });
+    defer {
+        finished.set();
+        watchdog.join();
+    }
+    // Pop exactly the config, leaving space in the ring but an older spill
+    // entry. A blocking push must not bypass that entry and cannot progress.
+    const message = io.mailbox.spsc.queue.pop().?;
+    try testing.expect(message == .change_config);
+    defer message.change_config.alloc.destroy(message.change_config.ptr);
+
+    try io.changeConfig(&td, message.change_config.ptr);
+    finished.set();
+    try testing.expect(!stop.load(.acquire));
+    try testing.expectEqual(terminalpkg.CursorStyle.bar, io.terminal.screens.active.cursor.cursor_style);
+    try testing.expect(!io.terminal.modes.get(.cursor_blinking));
+    try testing.expectEqual(configpkg.ConditionalState.Theme.light, io.config.conditional_state.theme);
+    for (0..63) |_| {
+        const queued = io.mailbox.spsc.queue.pop().?;
+        try testing.expect(queued == .write_stable);
+        try testing.expectEqualStrings("ring", queued.write_stable);
+    }
+    const spilled = io.mailbox.spsc.queue.pop().?;
+    try testing.expect(spilled == .write_stable);
+    try testing.expectEqualStrings("spill", spilled.write_stable);
+    const report = io.mailbox.spsc.queue.pop().?;
+    try testing.expect(report == .color_scheme_report);
+    try testing.expect(!report.color_scheme_report.force);
+    try testing.expect(io.mailbox.spsc.queue.pop() == null);
+}

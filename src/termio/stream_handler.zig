@@ -118,8 +118,11 @@ pub const StreamHandler = struct {
             log.warn("failed to set default cursor style: {}", .{err});
         };
 
-        // The config could have changed any of our colors so update mode 2031
-        self.messageWriter(.{ .color_scheme_report = .{ .force = false } });
+        // Config changes run on the IO mailbox consumer (Termio.changeConfig),
+        // unlike VT callbacks on the reader. Waiting for this same queue to
+        // drain would deadlock when another producer has filled it or spilled.
+        // Nonblocking publication appends behind existing work and wakes IO.
+        self.termio_mailbox.sendNonBlocking(.{ .color_scheme_report = .{ .force = false } });
     }
 
     inline fn surfaceMessageWriter(
