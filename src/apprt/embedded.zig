@@ -1334,6 +1334,15 @@ pub const CAPI = struct {
         }
     };
 
+    // ghostty_text_read_status_e. Values are part of the additive C ABI.
+    const TextReadStatus = enum(c_int) {
+        ok = 0,
+        busy = 1,
+        invalid_selection = 2,
+        failed = 3,
+        no_selection = 4,
+    };
+
     // ghostty_point_s
     const Point = extern struct {
         tag: Tag,
@@ -1685,6 +1694,44 @@ pub const CAPI = struct {
         ) orelse return false;
 
         return readTextLocked(surface, core_sel, result);
+    }
+
+    /// App-thread only; the caller keeps the surface alive throughout this
+    /// synchronous call. Only lock acquisition is bounded: formatting after
+    /// acquisition still runs on the caller and has no wall-time bound.
+    /// A non-OK result transfers no ownership and leaves result zeroed.
+    export fn ghostty_surface_try_read_text(
+        surface: *Surface,
+        sel: Selection,
+        result: *Text,
+    ) TextReadStatus {
+        result.* = std.mem.zeroes(Text);
+        const core_surface = &surface.core_surface;
+        if (!core_surface.renderer_state.mutex.tryLock()) return .busy;
+        defer core_surface.renderer_state.mutex.unlock();
+
+        const core_sel = sel.core(
+            core_surface.renderer_state.terminal.screens.active,
+        ) orelse return .invalid_selection;
+
+        return if (readTextLocked(surface, core_sel, result)) .ok else .failed;
+    }
+
+    /// Same ownership and timing contract as try_read_text. Selection is
+    /// inspected only after acquisition; no borrowed selection escapes.
+    export fn ghostty_surface_try_read_selection(
+        surface: *Surface,
+        result: *Text,
+    ) TextReadStatus {
+        result.* = std.mem.zeroes(Text);
+        const core_surface = &surface.core_surface;
+        if (!core_surface.renderer_state.mutex.tryLock()) return .busy;
+        defer core_surface.renderer_state.mutex.unlock();
+
+        const core_sel = core_surface.io.terminal.screens.active.selection orelse
+            return .no_selection;
+
+        return if (readTextLocked(surface, core_sel, result)) .ok else .failed;
     }
 
     fn readTextLocked(

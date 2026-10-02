@@ -25,6 +25,13 @@ pub fn build(b: *std.Build) !void {
     // Ghostty dependencies used by many artifacts.
     const deps = try buildpkg.SharedDeps.init(b, &config);
 
+    // Opt-in native C ABI fixture. This uses a separate library root; its
+    // test controls are never compiled into shipping libghostty artifacts.
+    if (b.option(bool, "c11-read-test", "Enable the isolated native read fixture build targets") orelse false) {
+        if (config.target.result.os.tag != .macos) return error.C11ReadTestRequiresMacOS;
+        try @import("src/build/C11ReadTest.zig").add(b, &deps);
+    }
+
     // The modules exported for Zig consumers of libghostty. If you're
     // writing a Zig program that uses libghostty, read this file.
     const mod = try buildpkg.GhosttyZig.init(
