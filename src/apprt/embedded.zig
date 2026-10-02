@@ -20,6 +20,7 @@ const CoreInspector = @import("../inspector/main.zig").Inspector;
 const CoreSurface = @import("../Surface.zig");
 const configpkg = @import("../config.zig");
 const Config = configpkg.Config;
+const prompt_region = @import("../terminal/prompt_region.zig");
 
 const log = std.log.scoped(.embedded_window);
 
@@ -1732,6 +1733,36 @@ pub const CAPI = struct {
             return .no_selection;
 
         return if (readTextLocked(surface, core_sel, result)) .ok else .failed;
+    }
+
+    /// App-thread only; the caller keeps the surface alive throughout this
+    /// synchronous call. Lock acquisition is attempted once. After acquisition
+    /// the native traversal is bounded to 16 rows around the active cursor, 4096
+    /// cells, and 16 KiB of UTF-8 text. All buffers belong to the caller; an
+    /// incomplete copy must never be classified as empty.
+    export fn ghostty_surface_try_read_prompt_region(
+        surface: *Surface,
+        result: *prompt_region.Result,
+        rows: [*]prompt_region.Row,
+        row_capacity: usize,
+        cells: [*]prompt_region.Cell,
+        cell_capacity: usize,
+        text: [*]u8,
+        text_capacity: usize,
+    ) TextReadStatus {
+        result.* = std.mem.zeroes(prompt_region.Result);
+        const core_surface = &surface.core_surface;
+        if (!core_surface.renderer_state.mutex.tryLock()) return .busy;
+        defer core_surface.renderer_state.mutex.unlock();
+
+        prompt_region.capture(
+            core_surface.renderer_state.terminal.screens.active,
+            result,
+            rows[0..@min(row_capacity, prompt_region.max_rows)],
+            cells[0..@min(cell_capacity, prompt_region.max_cells)],
+            text[0..@min(text_capacity, prompt_region.max_text_bytes)],
+        );
+        return .ok;
     }
 
     fn readTextLocked(
