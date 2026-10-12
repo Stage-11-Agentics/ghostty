@@ -236,6 +236,51 @@ test "prompt region preserves italic cells apart from faint" {
     try testing.expect(!cells[4].italic);
 }
 
+test "prompt region reads Grok's recorded suggestion as italic, not faint" {
+    const Terminal = @import("Terminal.zig");
+    const testing = std.testing;
+    var terminal = try Terminal.init(testing.allocator, .{
+        .cols = 100,
+        .rows = 30,
+        .max_scrollback = 0,
+    });
+    defer terminal.deinit(testing.allocator);
+    var stream = terminal.vtStream();
+    defer stream.deinit();
+
+    // Bytes recorded from Grok 1.0.50 (Grok 4.7) in a 100x30 pty: the boxed
+    // composer's prefix, then the next-prompt suggestion, then the cursor
+    // parked on the suggestion's first cell.
+    try stream.nextSlice("\x1b[26;1H  \x1b[38;2;80;80;88;48;2;20;20;20m\xe2\x94\x82" ++
+        "\x1b[38;2;225;225;225;48;2;20;20;20m \x1b[38;2;200;200;200;48;2;20;20;20m\xe2\x9d\xaf ");
+    try stream.nextSlice("\x1b[26;7H\x1b[3m\x1b[38;2;88;88;88;48;2;20;20;20m" ++
+        "Reply with the one word CHARLIE and stop.\x1b[29;3H\x1b[23m");
+    try stream.nextSlice("\x1b[26;7H");
+
+    var result: Result = .{};
+    var rows: [max_rows]Row = undefined;
+    var cells: [max_cells]Cell = undefined;
+    var bytes: [max_text_bytes]u8 = undefined;
+    capture(terminal.screens.active, &result, &rows, &cells, &bytes);
+
+    try testing.expect(result.complete);
+    try testing.expectEqual(@as(u32, 6), result.cursor_x);
+    try testing.expectEqual(@as(u32, 25), result.cursor_y);
+    var prompt_row: ?Row = null;
+    for (rows[0..result.row_count]) |row| {
+        if (row.screen_y == 25) prompt_row = row;
+    }
+    const row = prompt_row orelse return error.TestUnexpectedResult;
+    const prefix = cells[row.cell_start + 4];
+    try testing.expectEqualStrings("\xe2\x9d\xaf", bytes[prefix.text_offset .. prefix.text_offset + prefix.text_len]);
+    try testing.expect(!prefix.italic);
+    for (cells[row.cell_start + 6 .. row.cell_start + 6 + 41]) |cell| {
+        try testing.expect(cell.italic);
+        try testing.expect(!cell.faint);
+    }
+    try testing.expect(!cells[row.cell_start + 6 + 41].italic);
+}
+
 test "prompt region marks bounded cell copies incomplete" {
     const Terminal = @import("Terminal.zig");
     const testing = std.testing;
