@@ -32,6 +32,8 @@ pub const Cell = extern struct {
     text_offset: u32 = 0,
     text_len: u32 = 0,
     faint: bool = false,
+    /// SGR 3. Grok draws its next-prompt suggestion italic, not faint.
+    italic: bool = false,
 };
 
 /// Copies no more than the native constants or the provided slice capacities.
@@ -133,10 +135,12 @@ pub fn capture(
             }
 
             const cell_index: usize = @intCast(result.cell_count);
+            const flags = row_pin.style(cell).flags;
             cell_buffer[cell_index] = .{
                 .text_offset = start,
                 .text_len = @intCast(cursor - start),
-                .faint = row_pin.style(cell).flags.faint,
+                .faint = flags.faint,
+                .italic = flags.italic,
             };
             result.cell_count += 1;
             row_buffer[row_index].cell_count += 1;
@@ -200,6 +204,36 @@ test "prompt region preserves faint cells and soft-wrap boundaries" {
     var saw_faint = false;
     for (cells[0..result.cell_count]) |cell| saw_faint = saw_faint or cell.faint;
     try testing.expect(saw_faint);
+}
+
+test "prompt region preserves italic cells apart from faint" {
+    const Terminal = @import("Terminal.zig");
+    const testing = std.testing;
+    var terminal = try Terminal.init(testing.allocator, .{
+        .cols = 16,
+        .rows = 2,
+        .max_scrollback = 0,
+    });
+    defer terminal.deinit(testing.allocator);
+
+    for ("ab") |byte| try terminal.print(byte);
+    try terminal.setAttribute(.italic);
+    for ("cd") |byte| try terminal.print(byte);
+    try terminal.setAttribute(.unset);
+
+    var result: Result = .{};
+    var rows: [max_rows]Row = undefined;
+    var cells: [max_cells]Cell = undefined;
+    var bytes: [max_text_bytes]u8 = undefined;
+    capture(terminal.screens.active, &result, &rows, &cells, &bytes);
+
+    try testing.expect(result.complete);
+    try testing.expect(!cells[0].italic);
+    try testing.expect(!cells[1].italic);
+    try testing.expect(cells[2].italic);
+    try testing.expect(cells[3].italic);
+    try testing.expect(!cells[2].faint);
+    try testing.expect(!cells[4].italic);
 }
 
 test "prompt region marks bounded cell copies incomplete" {
