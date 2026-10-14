@@ -135,6 +135,7 @@ pub fn captureAt(
         const row_index: usize = @intCast(result.row_count);
         const row_start_cell_count = result.cell_count;
         const row_start_text_len = result.text_len;
+        const row_start_complete = result.complete;
         row_buffer[row_index] = .{
             .screen_y = @intCast(y),
             .cell_start = result.cell_count,
@@ -209,6 +210,7 @@ pub fn captureAt(
             if (bottom_up and result.row_count > 0) {
                 result.cell_count = row_start_cell_count;
                 result.text_len = row_start_text_len;
+                result.complete = row_start_complete;
             } else {
                 result.complete = false;
             }
