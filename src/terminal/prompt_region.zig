@@ -411,6 +411,33 @@ test "prompt region bottom anchor reads the last rows, not the cursor's" {
     try testing.expect(std.mem.indexOf(u8, bytes[0..result.text_len], "bottom") != null);
 }
 
+test "prompt region bottom anchor keeps the composer inside the cell budget" {
+    const Terminal = @import("Terminal.zig");
+    const testing = std.testing;
+    var terminal = try Terminal.init(testing.allocator, .{
+        .cols = 320,
+        .rows = 30,
+        .max_scrollback = 0,
+    });
+    defer terminal.deinit(testing.allocator);
+    var stream = terminal.vtStream();
+    defer stream.deinit();
+    try stream.nextSlice("\x1b[30;1HGROK-COMPOSER\x1b[3;1H");
+
+    var result: Result = .{};
+    var rows: [max_rows]Row = undefined;
+    var cells: [max_cells]Cell = undefined;
+    var bytes: [max_text_bytes]u8 = undefined;
+    captureAt(terminal.screens.active, .bottom, &result, &rows, &cells, &bytes);
+
+    try testing.expect(result.complete);
+    try testing.expectEqual(@as(u32, 12), result.row_count);
+    try testing.expectEqual(@as(u32, 18), rows[0].screen_y);
+    try testing.expectEqual(@as(u32, 29), rows[11].screen_y);
+    try testing.expectEqual(@as(u32, 3840), result.cell_count);
+    try testing.expect(std.mem.indexOf(u8, bytes[0..result.text_len], "GROK-COMPOSER") != null);
+}
+
 test "prompt region bottom anchor on a short screen reads every row" {
     const Terminal = @import("Terminal.zig");
     const testing = std.testing;
