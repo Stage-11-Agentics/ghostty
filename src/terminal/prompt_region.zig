@@ -113,22 +113,28 @@ pub fn captureAt(
         .bottom => screen_rows - 1,
     };
 
+    const bottom_up = anchor == .bottom;
+    const scan_start_y = if (bottom_up) last_y else first_y;
+    const scan_count = last_y - first_y + 1;
     var row_pin = screen.pages.pin(.{ .active = .{
         .x = 0,
-        .y = @intCast(first_y),
+        .y = @intCast(scan_start_y),
     } }) orelse {
         result.complete = false;
         return;
     };
 
-    var y = first_y;
-    while (y <= last_y) : (y += 1) {
+    var row_offset: usize = 0;
+    while (row_offset < scan_count) : (row_offset += 1) {
         if (result.row_count >= @as(u32, @intCast(row_limit))) {
             result.complete = false;
             break;
         }
+        const y = if (bottom_up) last_y - row_offset else first_y + row_offset;
         const row = row_pin.rowAndCell().row;
         const row_index: usize = @intCast(result.row_count);
+        const row_start_cell_count = result.cell_count;
+        const row_start_text_len = result.text_len;
         row_buffer[row_index] = .{
             .screen_y = @intCast(y),
             .cell_start = result.cell_count,
@@ -196,15 +202,27 @@ pub fn captureAt(
             row_buffer[row_index].cell_count += 1;
             result.text_len = @intCast(cursor);
         }
-        if (clipped) break;
+        if (clipped) {
+            // For a bottom anchor, a partial row above the retained bottom
+            // suffix is outside the useful window. Discard it so the complete
+            // composer rows remain classifiable under the cell budget.
+            if (bottom_up and result.row_count > 0) {
+                result.cell_count = row_start_cell_count;
+                result.text_len = row_start_text_len;
+            } else {
+                result.complete = false;
+            }
+            break;
+        }
         result.row_count += 1;
-        if (y < last_y) {
-            row_pin = row_pin.down(1) orelse {
+        if (row_offset + 1 < scan_count) {
+            row_pin = (if (bottom_up) row_pin.up(1) else row_pin.down(1)) orelse {
                 result.complete = false;
                 break;
             };
         }
     }
+    if (bottom_up) std.mem.reverse(Row, row_buffer[0..result.row_count]);
 }
 
 fn explicitRgb(color: Style.Color) ?u32 {
