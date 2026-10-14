@@ -1765,6 +1765,35 @@ pub const CAPI = struct {
         return .ok;
     }
 
+    /// Same bounds and lock as `ghostty_surface_try_read_prompt_region`, but
+    /// the window is the last 16 rows of the active screen. The result still
+    /// reports the live cursor, which may sit outside the window.
+    export fn ghostty_surface_try_read_prompt_region_bottom(
+        surface: *Surface,
+        result: *prompt_region.Result,
+        rows: [*]prompt_region.Row,
+        row_capacity: usize,
+        cells: [*]prompt_region.Cell,
+        cell_capacity: usize,
+        text: [*]u8,
+        text_capacity: usize,
+    ) TextReadStatus {
+        result.* = std.mem.zeroes(prompt_region.Result);
+        const core_surface = &surface.core_surface;
+        if (!core_surface.renderer_state.mutex.tryLock()) return .busy;
+        defer core_surface.renderer_state.mutex.unlock();
+
+        prompt_region.captureAt(
+            core_surface.renderer_state.terminal.screens.active,
+            .bottom,
+            result,
+            rows[0..@min(row_capacity, prompt_region.max_rows)],
+            cells[0..@min(cell_capacity, prompt_region.max_cells)],
+            text[0..@min(text_capacity, prompt_region.max_text_bytes)],
+        );
+        return .ok;
+    }
+
     fn readTextLocked(
         surface: *Surface,
         core_sel: terminal.Selection,
