@@ -25,7 +25,7 @@ const oni = @import("oniguruma");
 /// There are many complicated cases where these heuristics break down, but
 /// handling them well requires a non-regex approach.
 const url_schemes =
-    \\https?://|mailto:|ftp://|file:|ssh:|git://|ssh://|tel:|magnet:|ipfs://|ipns://|gemini://|gopher://|news:
+    \\https?://|mailto:|ftp://|file:|ssh:|git://|ssh://|tel:|magnet:|ipfs://|ipns://|gemini://|gopher://|news:|c11://
 ;
 
 const ipv6_url_pattern =
@@ -143,6 +143,22 @@ test "url regex" {
         .{
             .input = "hello https://example.com world",
             .expect = "https://example.com",
+        },
+        .{
+            .input = "Open c11://panel/11111111-1111-4111-8111-111111111111 now",
+            .expect = "c11://panel/11111111-1111-4111-8111-111111111111",
+        },
+        .{
+            .input = "Open c11://workspace/22222222-2222-4222-8222-222222222222 now",
+            .expect = "c11://workspace/22222222-2222-4222-8222-222222222222",
+        },
+        .{
+            .input = "C11 test (c11://panel/11111111-1111-4111-8111-111111111111)",
+            .expect = "c11://panel/11111111-1111-4111-8111-111111111111",
+        },
+        .{
+            .input = "[C11 test](c11://panel/11111111-1111-4111-8111-111111111111).",
+            .expect = "c11://panel/11111111-1111-4111-8111-111111111111",
         },
         .{
             .input = "https://example.com/foo(bar) more",
