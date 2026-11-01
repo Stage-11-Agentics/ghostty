@@ -413,6 +413,8 @@ pub const IoMode = enum(c_int) {
 pub const IoWriteCallback = *const fn (?*anyopaque, [*]const u8, usize) callconv(.c) void;
 pub const EncodedPasteCallback = *const fn (?*anyopaque, [*]const u8, usize, [*]const u8, usize) callconv(.c) void;
 
+pub const EncodedKeyCallback = *const fn (?*anyopaque, [*]const u8, usize) callconv(.c) void;
+
 pub const Surface = struct {
     app: *App,
     platform: Platform,
@@ -1981,6 +1983,24 @@ pub const CAPI = struct {
         defer result.deinit(surface.core_surface.alloc);
         if (result.body.len > byte_limit or result.submit.len > byte_limit - result.body.len) return false;
         complete(userdata, result.body.ptr, result.body.len, result.submit.ptr, result.submit.len);
+        return true;
+    }
+
+    /// One synchronous capture on a manual surface. No existing key path runs.
+    export fn ghostty_surface_encode_key(
+        surface: *Surface,
+        event: KeyEvent,
+        release_after_press: bool,
+        byte_limit: usize,
+        callback: ?EncodedKeyCallback,
+        userdata: ?*anyopaque,
+    ) bool {
+        const complete = callback orelse return false;
+        if (surface.io_mode != .manual) return false;
+        const core_event = event.keyEvent().core() orelse return false;
+        const result = surface.core_surface.encodeKeyTransaction(core_event, release_after_press, byte_limit) catch return false;
+        defer surface.core_surface.alloc.free(result);
+        complete(userdata, result.ptr, result.len);
         return true;
     }
 

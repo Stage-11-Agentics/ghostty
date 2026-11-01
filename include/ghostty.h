@@ -1185,6 +1185,17 @@ void ghostty_surface_text(ghostty_surface_t, const char*, uintptr_t);
 // callers must obtain any required approval before encoding.
 bool ghostty_surface_encode_paste(ghostty_surface_t, const char*, uintptr_t,
                                   bool, uintptr_t, ghostty_encoded_paste_cb, void*);
+// Manual IO only, on the owning thread. Capture one canonical key event and
+// optionally its release (release_after_press requires a press event). Applies
+// configured modifier remapping and keyboard/linefeed modes from one snapshot.
+// Does not run bindings, change selection/key state, queue IO, or send bytes.
+// byte_limit must cover 16*strlen(event.text) + 512 (NULL text has length zero).
+// Overflow or insufficient capacity returns false without a callback. Success
+// invokes callback exactly once, synchronously outside terminal locks; bytes
+// are borrowed only during that call. An encoded event may have zero bytes.
+typedef void (*ghostty_encoded_key_cb)(void*, const uint8_t*, uintptr_t);
+bool ghostty_surface_encode_key(ghostty_surface_t, ghostty_input_key_s, bool,
+                                uintptr_t, ghostty_encoded_key_cb, void*);
 void ghostty_surface_preedit(ghostty_surface_t, const char*, uintptr_t);
 void ghostty_surface_process_output(ghostty_surface_t, const char*, uintptr_t);
 bool ghostty_surface_mouse_captured(ghostty_surface_t);

@@ -3358,6 +3358,32 @@ pub fn encodePasteTransaction(self: *Surface, text: []const u8, submit: bool) !i
     return input.transaction_encode.encode(self.alloc, text, submit, options[0], options[1], options[2]);
 }
 
+/// Capture a key without entering the existing key callback or changing state.
+/// Configuration and terminal modes are borrowed on the owning thread; the
+/// renderer lock is released before allocation and the embedder's callback.
+pub fn encodeKeyTransaction(self: *Surface, original: input.KeyEvent, release_after_press: bool, byte_limit: usize) ![]u8 {
+    var event = original;
+    if (self.config.key_remaps.isRemapped(event.mods)) {
+        event.mods = self.config.key_remaps.apply(event.mods);
+    }
+    const option_as_alt: input.OptionAsAlt = if (comptime builtin.os.tag == .macos)
+        self.config.macos_option_as_alt orelse if (event.mods.alt)
+            self.rt_app.keyboardLayout().detectOptionAsAlt()
+        else
+            .false
+    else
+        .false;
+    const snapshot = snapshot: {
+        self.renderer_state.mutex.lock();
+        defer self.renderer_state.mutex.unlock();
+        const t = &self.io.terminal;
+        var opts = input.key_encode.Options.fromTerminal(t);
+        opts.macos_option_as_alt = option_as_alt;
+        break :snapshot .{ opts, t.modes.get(.linefeed) };
+    };
+    return input.transaction_encode.encodeKey(self.alloc, event, release_after_press, snapshot[0], snapshot[1], byte_limit);
+}
+
 /// Callback for when the surface is fully visible or not, regardless
 /// of focus state. This is used to pause rendering when the surface
 /// is not visible, and also re-render when it becomes visible again.
