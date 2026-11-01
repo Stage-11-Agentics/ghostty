@@ -1117,6 +1117,15 @@ typedef void (*ghostty_config_env_cb)(void*, const char*, uintptr_t,
                                      const char*, uintptr_t);
 bool ghostty_config_visit_launch(ghostty_config_t, bool, ghostty_config_command_cb,
                                 ghostty_config_env_cb, void*);
+// Read-only visitation of exactly working-directory (when set), then term.
+// Keys and values are byte slices borrowed only during the callback, including
+// empty values. Call on the config's owning thread without mutating/freeing it.
+// No process state or environment is read. False means config/callback was null,
+// and no callback was invoked. Existing config getters remain unchanged.
+typedef void (*ghostty_config_launch_field_cb)(void*, const char*, uintptr_t,
+                                              const char*, uintptr_t);
+bool ghostty_config_visit_launch_fields(ghostty_config_t,
+                                       ghostty_config_launch_field_cb, void*);
 ghostty_input_trigger_s ghostty_config_trigger(ghostty_config_t,
                                                const char*,
                                                uintptr_t);

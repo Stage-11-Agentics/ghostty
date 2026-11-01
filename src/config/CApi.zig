@@ -136,6 +136,77 @@ export fn ghostty_config_visit_launch(
     return true;
 }
 
+/// Fixed launch-field allowlist, with borrowed slices and no process reads.
+export fn ghostty_config_visit_launch_fields(
+    self: ?*const Config,
+    callback: ?EnvCallback,
+    userdata: ?*anyopaque,
+) bool {
+    const cfg = self orelse return false;
+    const visit_field = callback orelse return false;
+    if (cfg.@"working-directory") |value| {
+        const name = "working-directory";
+        visit_field(userdata, name, name.len, value.ptr, value.len);
+    }
+    const name = "term";
+    visit_field(userdata, name, name.len, cfg.term.ptr, cfg.term.len);
+    return true;
+}
+
+test "launch fields visitor preserves exact borrowed strings and fixed allowlist" {
+    const testing = std.testing;
+    const Capture = struct {
+        const Entry = struct {
+            key: [64]u8 = undefined,
+            key_len: usize = 0,
+            value: [64]u8 = undefined,
+            value_len: usize = 0,
+        };
+        entries: [4]Entry = undefined,
+        len: usize = 0,
+        fn field(raw: ?*anyopaque, key: [*]const u8, key_len: usize, value: [*]const u8, value_len: usize) callconv(.c) void {
+            const capture: *@This() = @ptrCast(@alignCast(raw.?));
+            capture.entries[capture.len] = .{ .key_len = key_len, .value_len = value_len };
+            @memcpy(capture.entries[capture.len].key[0..key_len], key[0..key_len]);
+            @memcpy(capture.entries[capture.len].value[0..value_len], value[0..value_len]);
+            capture.len += 1;
+        }
+    };
+    var cfg = try Config.default(testing.allocator);
+    defer cfg.deinit();
+    // These slices deliberately need no NUL terminator.
+    const cwd = [_]u8{ '/', 'a', ' ', 0xc3, 0xa9 };
+    const term = [_]u8{ 'v', 't', '1', '0', '0' };
+    cfg.@"working-directory" = &cwd;
+    cfg.term = &term;
+    try cfg.env.parseCLI(cfg._arena.?.allocator(), "UNRELATED=not visited");
+    var capture: Capture = .{};
+    try testing.expect(!ghostty_config_visit_launch_fields(null, Capture.field, &capture));
+    try testing.expect(!ghostty_config_visit_launch_fields(&cfg, null, &capture));
+    try testing.expectEqual(@as(usize, 0), capture.len);
+    try testing.expect(ghostty_config_visit_launch_fields(&cfg, Capture.field, &capture));
+    try testing.expectEqual(@as(usize, 2), capture.len);
+    try testing.expectEqualStrings("working-directory", capture.entries[0].key[0..capture.entries[0].key_len]);
+    try testing.expectEqualStrings(&cwd, capture.entries[0].value[0..capture.entries[0].value_len]);
+    try testing.expectEqualStrings("term", capture.entries[1].key[0..capture.entries[1].key_len]);
+    try testing.expectEqualStrings(&term, capture.entries[1].value[0..capture.entries[1].value_len]);
+    try testing.expectEqualStrings(&cwd, cfg.@"working-directory".?);
+    try testing.expectEqualStrings(&term, cfg.term);
+    try testing.expectEqualStrings("not visited", cfg.env.map.get("UNRELATED").?);
+    cfg.@"working-directory" = null;
+    capture = .{};
+    try testing.expect(ghostty_config_visit_launch_fields(&cfg, Capture.field, &capture));
+    try testing.expectEqual(@as(usize, 1), capture.len);
+    try testing.expectEqualStrings("term", capture.entries[0].key[0..capture.entries[0].key_len]);
+    cfg.@"working-directory" = "";
+    cfg.term = "";
+    capture = .{};
+    try testing.expect(ghostty_config_visit_launch_fields(&cfg, Capture.field, &capture));
+    try testing.expectEqual(@as(usize, 2), capture.len);
+    try testing.expectEqual(@as(usize, 0), capture.entries[0].value_len);
+    try testing.expectEqual(@as(usize, 0), capture.entries[1].value_len);
+}
+
 export fn ghostty_config_trigger(
     self: *Config,
     str: [*]const u8,
