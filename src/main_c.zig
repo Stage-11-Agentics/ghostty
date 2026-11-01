@@ -17,6 +17,42 @@ const state = &@import("global.zig").state;
 const apprt = @import("apprt.zig");
 const internal_os = @import("os/main.zig");
 
+/// Borrows the callback's live clipboard request without consuming it. The C
+/// enum output is an int, independent of the internal union tag's storage.
+export fn ghostty_clipboard_request_get_type(
+    request: ?*const anyopaque,
+    result: ?*c_int,
+) bool {
+    const ptr = request orelse return false;
+    const out = result orelse return false;
+    const clipboard_request: *const apprt.ClipboardRequest = @ptrCast(@alignCast(ptr));
+    out.* = @intFromEnum(std.meta.activeTag(clipboard_request.*));
+    return true;
+}
+
+test "clipboard request accessor borrows each kind and rejects null arguments" {
+    const requests = [_]apprt.ClipboardRequest{
+        .{ .paste = {} },
+        .{ .osc_52_read = .standard },
+        .{ .osc_52_write = .selection },
+    };
+    for (requests, 0..) |original, index| {
+        var request = original;
+        var result: c_int = -1;
+        try std.testing.expect(ghostty_clipboard_request_get_type(&request, &result));
+        try std.testing.expectEqual(@as(c_int, @intCast(index)), result);
+        try std.testing.expectEqualDeep(original, request);
+        // A second read succeeds: the request was neither consumed nor changed.
+        try std.testing.expect(ghostty_clipboard_request_get_type(&request, &result));
+        try std.testing.expectEqual(@as(c_int, @intCast(index)), result);
+        try std.testing.expect(!ghostty_clipboard_request_get_type(&request, null));
+    }
+    var result: c_int = -1;
+    try std.testing.expect(!ghostty_clipboard_request_get_type(null, &result));
+    try std.testing.expectEqual(@as(c_int, -1), result);
+    try std.testing.expect(!ghostty_clipboard_request_get_type(null, null));
+}
+
 // Some comptime assertions that our C API depends on.
 comptime {
     // We allow tests to reference this file because we unit test

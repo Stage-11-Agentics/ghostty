@@ -1202,6 +1202,11 @@ void ghostty_surface_split_resize(ghostty_surface_t,
                                   uint16_t);
 void ghostty_surface_split_equalize(ghostty_surface_t);
 bool ghostty_surface_binding_action(ghostty_surface_t, const char*, uintptr_t);
+// Borrows a live request from the read/confirm clipboard callback. Call before
+// completing that request; completion invalidates its pointer. Returns false
+// for a null argument, leaving the output unchanged. Does not consume, mutate,
+// or complete the request. The result uses the existing clipboard request enum.
+bool ghostty_clipboard_request_get_type(const void*, ghostty_clipboard_request_e*);
 void ghostty_surface_complete_clipboard_request(ghostty_surface_t,
                                                 const char*,
                                                 void*,
