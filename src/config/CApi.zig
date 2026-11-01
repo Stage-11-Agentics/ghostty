@@ -100,6 +100,42 @@ export fn ghostty_config_get(
     return c_get.get(self, key, ptr);
 }
 
+/// Sync with ghostty_config_command_kind_e. This visitor only reads loaded
+/// config values; it never resolves a shell, captures process env, or logs data.
+const CommandKind = enum(c_int) { none = 0, shell = 1, direct = 2 };
+const CommandCallback = *const fn (?*anyopaque, CommandKind, usize, usize, [*]const u8, usize) callconv(.c) void;
+const EnvCallback = *const fn (?*anyopaque, [*]const u8, usize, [*]const u8, usize) callconv(.c) void;
+
+export fn ghostty_config_visit_launch(
+    self: *const Config,
+    initial: bool,
+    command_callback: ?CommandCallback,
+    env_callback: ?EnvCallback,
+    userdata: ?*anyopaque,
+) bool {
+    const visit_command = command_callback orelse return false;
+    const visit_env = env_callback orelse return false;
+    const command = if (initial) self.@"initial-command" orelse self.command else self.command;
+    if (command) |cmd| {
+        switch (cmd) {
+            .shell => |text| visit_command(userdata, .shell, 0, 1, text.ptr, text.len),
+            .direct => |args| {
+                if (args.len == 0) visit_command(userdata, .direct, 0, 0, "", 0);
+                for (args, 0..) |arg, index| {
+                    visit_command(userdata, .direct, index, args.len, arg.ptr, arg.len);
+                }
+            },
+        }
+    } else visit_command(userdata, .none, 0, 0, "", 0);
+    var it = self.env.iterator();
+    while (it.next()) |entry| {
+        const key = entry.key_ptr.*;
+        const value = entry.value_ptr.*;
+        visit_env(userdata, key.ptr, key.len, value.ptr, value.len);
+    }
+    return true;
+}
+
 export fn ghostty_config_trigger(
     self: *Config,
     str: [*]const u8,
@@ -241,4 +277,82 @@ test "ghostty_config_get: struct cval conversion" {
     try testing.expectEqual(@as(u8, 12), out.r);
     try testing.expectEqual(@as(u8, 34), out.g);
     try testing.expectEqual(@as(u8, 56), out.b);
+}
+
+test "launch config visitor preserves command selection and explicit env without mutation" {
+    const testing = std.testing;
+    const Capture = struct {
+        const Entry = struct {
+            kind: CommandKind = .none,
+            index: usize = 0,
+            count: usize = 0,
+            key: [64]u8 = undefined,
+            key_len: usize = 0,
+            value: [64]u8 = undefined,
+            value_len: usize = 0,
+        };
+        entries: [8]Entry = undefined,
+        len: usize = 0,
+        fn command(raw: ?*anyopaque, kind: CommandKind, index: usize, count: usize, ptr: [*]const u8, len: usize) callconv(.c) void {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.entries[self.len] = .{ .kind = kind, .index = index, .count = count, .value_len = len };
+            @memcpy(self.entries[self.len].value[0..len], ptr[0..len]);
+            self.len += 1;
+        }
+        fn env(raw: ?*anyopaque, key: [*]const u8, key_len: usize, value: [*]const u8, value_len: usize) callconv(.c) void {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.entries[self.len] = .{ .key_len = key_len, .value_len = value_len };
+            @memcpy(self.entries[self.len].key[0..key_len], key[0..key_len]);
+            @memcpy(self.entries[self.len].value[0..value_len], value[0..value_len]);
+            self.len += 1;
+        }
+    };
+    var cfg = try Config.default(testing.allocator);
+    defer cfg.deinit();
+    var capture: Capture = .{};
+    try testing.expect(!ghostty_config_visit_launch(&cfg, false, null, Capture.env, &capture));
+    try testing.expect(!ghostty_config_visit_launch(&cfg, false, Capture.command, null, &capture));
+    try testing.expectEqual(@as(usize, 0), capture.len);
+    try testing.expect(ghostty_config_visit_launch(&cfg, false, Capture.command, Capture.env, &capture));
+    try testing.expectEqual(@as(usize, 1), capture.len);
+    try testing.expectEqual(CommandKind.none, capture.entries[0].kind);
+    try testing.expectEqual(@as(usize, 0), capture.entries[0].count);
+
+    const alloc = cfg._arena.?.allocator();
+    cfg.command = .{ .shell = "printf '%s' \"$VALUE\"" };
+    const args = [_][:0]const u8{ "/bin/example", "one argument", "", "hé" };
+    cfg.@"initial-command" = .{ .direct = &args };
+    try cfg.env.parseCLI(alloc, "EXPLICIT=old");
+    try cfg.env.parseCLI(alloc, "EXPLICIT=exact value");
+    try cfg.env.parseCLI(alloc, "REMOVED=value");
+    try cfg.env.parseCLI(alloc, "REMOVED=");
+    capture = .{};
+    try testing.expect(ghostty_config_visit_launch(&cfg, true, Capture.command, Capture.env, &capture));
+    try testing.expectEqual(@as(usize, 5), capture.len);
+    for (args, 0..) |arg, i| {
+        const entry = capture.entries[i];
+        try testing.expectEqual(CommandKind.direct, entry.kind);
+        try testing.expectEqual(i, entry.index);
+        try testing.expectEqual(args.len, entry.count);
+        try testing.expectEqualStrings(arg, entry.value[0..entry.value_len]);
+    }
+    const env = capture.entries[4];
+    try testing.expectEqualStrings("EXPLICIT", env.key[0..env.key_len]);
+    try testing.expectEqualStrings("exact value", env.value[0..env.value_len]);
+
+    for ([_]bool{ false, true }) |initial| {
+        if (initial) cfg.@"initial-command" = null;
+        capture = .{};
+        try testing.expect(ghostty_config_visit_launch(&cfg, initial, Capture.command, Capture.env, &capture));
+        try testing.expectEqual(@as(usize, 2), capture.len);
+        try testing.expectEqual(CommandKind.shell, capture.entries[0].kind);
+        try testing.expectEqualStrings(cfg.command.?.shell, capture.entries[0].value[0..capture.entries[0].value_len]);
+    }
+    try testing.expectEqualStrings("exact value", cfg.env.map.get("EXPLICIT").?);
+    try testing.expectEqual(@as(usize, 1), cfg.env.count());
+    cfg.command = .{ .direct = &.{} };
+    capture = .{};
+    try testing.expect(ghostty_config_visit_launch(&cfg, false, Capture.command, Capture.env, &capture));
+    try testing.expectEqual(CommandKind.direct, capture.entries[0].kind);
+    try testing.expectEqual(@as(usize, 0), capture.entries[0].count);
 }

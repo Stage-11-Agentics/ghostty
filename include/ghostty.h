@@ -1097,6 +1097,26 @@ void ghostty_config_load_default_files(ghostty_config_t);
 void ghostty_config_load_recursive_files(ghostty_config_t);
 void ghostty_config_finalize(ghostty_config_t);
 bool ghostty_config_get(ghostty_config_t, void*, const char*, uintptr_t);
+// Read-only visitation of the selected loaded command and explicit config env.
+// Call on the config's owning thread; do not mutate/free it during visitation.
+// All strings are borrowed only for the callback. No process environment is read.
+// With initial=true, initial-command wins when set, otherwise command is used.
+// Command callbacks precede env callbacks. NONE emits once with count=0; SHELL
+// emits once with count=1; DIRECT emits each argv element in order (or once with
+// count=0 for an empty argv). Empty entries have a valid pointer and length zero.
+// Env contains only surviving explicit env entries, with no inherited defaults.
+// False means a callback was null and neither callback was invoked.
+typedef enum {
+  GHOSTTY_CONFIG_COMMAND_NONE = 0,
+  GHOSTTY_CONFIG_COMMAND_SHELL = 1,
+  GHOSTTY_CONFIG_COMMAND_DIRECT = 2,
+} ghostty_config_command_kind_e;
+typedef void (*ghostty_config_command_cb)(void*, ghostty_config_command_kind_e,
+                                         uintptr_t, uintptr_t, const char*, uintptr_t);
+typedef void (*ghostty_config_env_cb)(void*, const char*, uintptr_t,
+                                     const char*, uintptr_t);
+bool ghostty_config_visit_launch(ghostty_config_t, bool, ghostty_config_command_cb,
+                                ghostty_config_env_cb, void*);
 ghostty_input_trigger_s ghostty_config_trigger(ghostty_config_t,
                                                const char*,
                                                uintptr_t);
