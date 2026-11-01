@@ -3342,6 +3342,22 @@ pub fn textCallback(self: *Surface, text: []const u8) !void {
     try self.completeClipboardPaste(text, true);
 }
 
+/// Encode without queuing IO, changing selection, or running key bindings.
+/// Call on the surface's owning thread. Both parts use one mode snapshot.
+pub fn encodePasteTransaction(self: *Surface, text: []const u8, submit: bool) !input.transaction_encode.Result {
+    const options = options: {
+        self.renderer_state.mutex.lock();
+        defer self.renderer_state.mutex.unlock();
+        const t = &self.io.terminal;
+        break :options .{
+            input.paste.Options.fromTerminal(t),
+            input.key_encode.Options.fromTerminal(t),
+            t.modes.get(.linefeed),
+        };
+    };
+    return input.transaction_encode.encode(self.alloc, text, submit, options[0], options[1], options[2]);
+}
+
 /// Callback for when the surface is fully visible or not, regardless
 /// of focus state. This is used to pause rendering when the surface
 /// is not visible, and also re-render when it becomes visible again.

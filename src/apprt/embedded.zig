@@ -411,6 +411,7 @@ pub const IoMode = enum(c_int) {
 };
 
 pub const IoWriteCallback = *const fn (?*anyopaque, [*]const u8, usize) callconv(.c) void;
+pub const EncodedPasteCallback = *const fn (?*anyopaque, [*]const u8, usize, [*]const u8, usize) callconv(.c) void;
 
 pub const Surface = struct {
     app: *App,
@@ -1956,6 +1957,31 @@ pub const CAPI = struct {
         len: usize,
     ) void {
         surface.textCallback(ptr[0..len]);
+    }
+
+    /// Synchronous, manual-IO-only capture. No output goes to the IO callback.
+    /// The borrowed slices exist only for this single completion callback.
+    export fn ghostty_surface_encode_paste(
+        surface: *Surface,
+        ptr: [*]const u8,
+        len: usize,
+        submit: bool,
+        byte_limit: usize,
+        callback: ?EncodedPasteCallback,
+        userdata: ?*anyopaque,
+    ) bool {
+        const complete = callback orelse return false;
+        if (surface.io_mode != .manual) return false;
+        // Refuse before allocating when even the worst-case bounded capture
+        // does not fit. Includes CR->CRLF, both fences, and encoded Return.
+        const doubled = std.math.mul(usize, len, 2) catch return false;
+        const bound = std.math.add(usize, doubled, 280) catch return false;
+        if (bound > byte_limit) return false;
+        const result = surface.core_surface.encodePasteTransaction(ptr[0..len], submit) catch return false;
+        defer result.deinit(surface.core_surface.alloc);
+        if (result.body.len > byte_limit or result.submit.len > byte_limit - result.body.len) return false;
+        complete(userdata, result.body.ptr, result.body.len, result.submit.ptr, result.submit.len);
+        return true;
     }
 
     /// Set the preedit text for the surface. This is used for IME

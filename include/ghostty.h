@@ -488,6 +488,9 @@ typedef enum {
 } ghostty_surface_io_mode_e;
 
 typedef void (*ghostty_io_write_cb)(void*, const char*, uintptr_t);
+// Borrowed body and optional Return bytes, valid only during this callback.
+typedef void (*ghostty_encoded_paste_cb)(void*, const char*, uintptr_t,
+                                       const char*, uintptr_t);
 
 typedef struct {
   ghostty_platform_e platform_tag;
@@ -1143,6 +1146,16 @@ bool ghostty_surface_key_is_binding(ghostty_surface_t,
                                     ghostty_input_key_s,
                                     ghostty_binding_flags_e*);
 void ghostty_surface_text(ghostty_surface_t, const char*, uintptr_t);
+// Manual IO only; call on the surface's owning thread. Encodes a paste and
+// optional unmodified Return press/release using one terminal-mode snapshot.
+// Applies the same sanitizer, bracket framing, keyboard protocol and linefeed
+// conversion as normal input, without queuing IO or invoking key bindings.
+// byte_limit must cover 2*text_length + 280 (overflow is refused). On success
+// callback runs exactly once, synchronously, outside terminal locks. On failure
+// it never runs and no bytes are sent. This does not apply clipboard prompting;
+// callers must obtain any required approval before encoding.
+bool ghostty_surface_encode_paste(ghostty_surface_t, const char*, uintptr_t,
+                                  bool, uintptr_t, ghostty_encoded_paste_cb, void*);
 void ghostty_surface_preedit(ghostty_surface_t, const char*, uintptr_t);
 void ghostty_surface_process_output(ghostty_surface_t, const char*, uintptr_t);
 bool ghostty_surface_mouse_captured(ghostty_surface_t);
