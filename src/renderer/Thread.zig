@@ -20,16 +20,6 @@ const log = std.log.scoped(.renderer_thread);
 const DRAW_INTERVAL = 8; // 120 FPS
 const CURSOR_BLINK_INTERVAL = 600;
 
-/// Whether calls to `drawFrame` must be done from the app thread.
-///
-/// If this is `true` then we send a `redraw_surface` message to the apprt
-/// whenever we need to draw instead of calling `drawFrame` directly.
-const must_draw_from_app_thread =
-    if (@hasDecl(apprt.App, "must_draw_from_app_thread"))
-        apprt.App.must_draw_from_app_thread
-    else
-        false;
-
 /// The type used for sending messages to the IO thread. For now this is
 /// hardcoded with a capacity. We can make this a comptime parameter in
 /// the future if we want it configurable.
@@ -469,6 +459,11 @@ fn applyVisible(self: *Thread, v: bool) void {
     // Visibility affects our QoS class
     self.setQosClass();
 
+    // Notify the renderer so it can update any state. This comes before the
+    // draw below: a renderer that released its GPU resources while hidden
+    // rebuilds them only once it knows it is visible again.
+    self.renderer.setVisible(v);
+
     // If we became visible then we immediately rebuild cells
     // (renderCallback skips updateFrame while invisible) and draw.
     if (v) {
@@ -477,11 +472,10 @@ fn applyVisible(self: *Thread, v: bool) void {
             self.flags.cursor_blink_visible,
         ) catch |err|
             log.warn("error rendering on visibility regain err={}", .{err});
-        self.drawFrame(false);
+        // `now`: the display link may already be running (started by
+        // setVisible above), and this first frame must not wait for it.
+        self.drawFrame(true);
     }
-
-    // Notify the renderer so it can update any state.
-    self.renderer.setVisible(v);
 
     // Note that we're explicitly today not stopping any
     // cursor timers, draw timers, etc. These things have very
@@ -552,7 +546,7 @@ fn drawFrame(self: *Thread, now: bool) void {
     // when we're forced to via `now`.
     if (!now and self.renderer.hasVsync()) return;
 
-    if (must_draw_from_app_thread) {
+    if (apprt.must_draw_from_app_thread) {
         _ = self.app_mailbox.push(
             .{ .redraw_surface = self.surface },
             .{ .instant = {} },
