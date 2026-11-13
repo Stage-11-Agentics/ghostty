@@ -309,6 +309,24 @@ pub fn keepPresentedContents(self: *const Metal, target: *Target) void {
     if (self.last_surface == target.surface) target.keep_contents = true;
 }
 
+/// The swap chain was released while hidden: keep the last frame in
+/// memory but off the footprint until the surface is shown again.
+pub fn hideKeptFrame(self: *Metal) void {
+    const surface = self.last_surface orelse return;
+    Target.keepFrameVolatile(surface);
+}
+
+/// The surface is being shown: make the kept frame non-volatile again. If
+/// macOS discarded it under memory pressure, drop it, so it is never
+/// re-presented; the regain draw shows current content a frame later.
+pub fn showKeptFrame(self: *Metal) void {
+    const surface = self.last_surface orelse return;
+    if (!Target.restoreKeptFrame(surface)) {
+        surface.release();
+        self.last_surface = null;
+    }
+}
+
 /// Present the last presented target again.
 pub inline fn presentLastTarget(self: *Metal) !void {
     const surface = self.last_surface orelse return;

@@ -124,6 +124,20 @@ pub fn deinit(self: *Self) void {
     self.texture.release();
 }
 
+/// A hidden terminal's kept frame stays in memory, off the footprint:
+/// volatile purgeable memory is not charged to the process, and macOS
+/// discards it only under memory pressure.
+pub fn keepFrameVolatile(surface: *IOSurface) void {
+    _ = surface.setPurgeable(macos.iosurface.c.kIOSurfacePurgeableVolatile);
+}
+
+/// Make a kept frame non-volatile again before it is shown. Returns false
+/// when macOS discarded it while it was volatile: its pixels are gone.
+pub fn restoreKeptFrame(surface: *IOSurface) bool {
+    const c = macos.iosurface.c;
+    return surface.setPurgeable(c.kIOSurfacePurgeableNonVolatile) != c.kIOSurfacePurgeableEmpty;
+}
+
 /// Test seam: make the texture allocation fail as if Metal returned nil.
 const test_seam = struct {
     var fail_texture: bool = false;
@@ -199,6 +213,44 @@ test "a kept target's surface keeps its pixels after the target is freed" {
     defer other.release();
     dropped.deinit();
     try std.testing.expectEqual(@as(u32, c.kIOSurfacePurgeableEmpty), purgeState(other));
+}
+
+test "a kept frame is volatile while hidden and non-volatile with its pixels when shown" {
+    const c = macos.iosurface.c;
+    const device = try testDevice();
+    defer device.release();
+
+    var target = try testTarget(device);
+    const surface = target.surface;
+    fillSurface(surface, 0x5A);
+    surface.retain();
+    defer surface.release();
+    target.keep_contents = true;
+    target.deinit();
+
+    keepFrameVolatile(surface);
+    try std.testing.expectEqual(@as(u32, c.kIOSurfacePurgeableVolatile), purgeState(surface));
+    try std.testing.expect(restoreKeptFrame(surface));
+    try std.testing.expectEqual(@as(u32, c.kIOSurfacePurgeableNonVolatile), purgeState(surface));
+    try std.testing.expect(surfaceAll(surface, 0x5A));
+}
+
+test "a kept frame discarded while hidden reports it on show" {
+    const c = macos.iosurface.c;
+    const device = try testDevice();
+    defer device.release();
+
+    var target = try testTarget(device);
+    const surface = target.surface;
+    surface.retain();
+    defer surface.release();
+    target.keep_contents = true;
+    target.deinit();
+
+    keepFrameVolatile(surface);
+    // Stand-in for macOS discarding it under memory pressure.
+    _ = surface.setPurgeable(c.kIOSurfacePurgeableEmpty);
+    try std.testing.expect(!restoreKeptFrame(surface));
 }
 
 test "a target whose texture can't be made frees its surface" {

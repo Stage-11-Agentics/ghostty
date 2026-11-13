@@ -62,6 +62,14 @@ pub const IOSurface = opaque {
         foundation.CFRelease(self);
     }
 
+    /// Set the purgeable state (`kIOSurfacePurgeable*`) and return the
+    /// previous one. `kIOSurfacePurgeableKeepCurrent` only reads it.
+    pub fn setPurgeable(self: *IOSurface, state: u32) u32 {
+        var old: u32 = 0;
+        _ = c.IOSurfaceSetPurgeable(@ptrCast(self), state, &old);
+        return old;
+    }
+
     pub fn retain(self: *IOSurface) void {
         foundation.CFRetain(self);
     }

@@ -1101,6 +1101,18 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             if (comptime !apprt.must_draw_from_app_thread) {
                 if (!visible) self.releaseGpuResources();
             }
+
+            // Shown again: the kept frame becomes non-volatile before the
+            // regain draw, or is dropped if macOS discarded it meanwhile.
+            // Only while released: with no swap chain no frame is in
+            // flight, so no completing frame can replace `last_surface`.
+            if (comptime @hasDecl(GraphicsAPI, "showKeptFrame")) {
+                if (visible) {
+                    self.draw_mutex.lock();
+                    defer self.draw_mutex.unlock();
+                    if (self.swap_chain == null) self.api.showKeptFrame();
+                }
+            }
         }
 
         /// Release the GPU resources we hold while the surface is not
@@ -1135,6 +1147,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 }
                 sc.freeFrames();
                 self.swap_chain = null;
+
+                // The kept frame stays in memory but off the footprint
+                // while hidden (`setVisible(true)` restores it).
+                if (comptime @hasDecl(GraphicsAPI, "hideKeptFrame")) {
+                    self.api.hideKeptFrame();
+                }
 
                 // Let the API drop any references it holds to swap
                 // chain resources (e.g. OpenGL's last presented target).
