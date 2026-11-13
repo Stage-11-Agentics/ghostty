@@ -275,8 +275,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             pub fn init(api: GraphicsAPI, custom_shaders: bool) !SwapChain {
                 var result: SwapChain = .{ .frames = undefined };
 
-                // Initialize all of our frame state.
-                for (&result.frames) |*frame| {
+                // Initialize all of our frame state. This runs again on
+                // every show after a hidden release, so a failure part way
+                // through must free the frames already built.
+                for (&result.frames, 0..) |*frame, i| {
+                    errdefer for (result.frames[0..i]) |*built| built.deinit();
                     frame.* = try FrameState.init(api, custom_shaders);
                 }
 
@@ -1540,11 +1543,13 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // rebuilds the swap chain.
             if (!self.display_realized) return;
 
-            // A hidden surface whose swap chain was released stays released:
-            // a synchronous draw while hidden (the layer's display callback on
-            // a bounds change) re-presents the last frame instead of
-            // rebuilding the swap chain. Becoming visible draws a fresh frame.
-            if (self.swap_chain == null and !self.visible.load(.monotonic)) {
+            // A released swap chain is rebuilt only by the renderer thread's
+            // draw. A synchronous draw (the layer's display callback on a
+            // bounds change) or any draw while hidden re-presents the last
+            // frame instead: the renderer thread may not have updated the
+            // cells since the show (a font change while hidden would draw
+            // stale atlas coordinates), and it draws a fresh frame on show.
+            if (self.swap_chain == null and (sync or !self.visible.load(.monotonic))) {
                 try self.api.presentLastTarget();
                 return;
             }
@@ -1867,16 +1872,17 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 }, .{ .forever = {} });
             }
 
-            // Always release our semaphore. The swap chain is
-            // guaranteed to exist here: it is only torn down after
-            // waiting for all in-flight frames to complete, and this
-            // callback is what signals that completion.
-            self.swap_chain.?.releaseFrame();
-
             if (health == .healthy) {
                 // Track that we have a last good frame to re-present during sync resize callbacks.
                 self.has_presented.store(true, .monotonic);
             }
+
+            // Always release our semaphore, last: once it is posted the
+            // swap chain (and on close, the renderer) may be torn down.
+            // The swap chain is guaranteed to exist here: it is only torn
+            // down after waiting for all in-flight frames to complete, and
+            // this callback is what signals that completion.
+            self.swap_chain.?.releaseFrame();
         }
 
         /// Call this any time the background image path changes.
