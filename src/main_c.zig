@@ -17,6 +17,55 @@ const state = &@import("global.zig").state;
 const apprt = @import("apprt.zig");
 const internal_os = @import("os/main.zig");
 
+/// The app-thread font size used by Surface.newSurfaceOptions. The renderer's
+/// current font face can lag a size/scale update and requires its shared lock;
+/// callers inheriting a size need only this authoritative main-owned value.
+export fn ghostty_surface_font_size(surface: ?*const apprt.embedded.Surface) f32 {
+    const ptr = surface orelse return 0;
+    return ptr.core_surface.font_size.points;
+}
+
+test "surface font size reads main-owned points without the font grid lock" {
+    const SharedGrid = @import("font/main.zig").SharedGrid;
+    const Harness = struct {
+        grid: *SharedGrid,
+        writer_locked: std.Thread.ResetEvent = .{},
+        release_writer: std.Thread.ResetEvent = .{},
+        writer_released: std.atomic.Value(bool) = .init(false),
+
+        fn write(self: *@This()) void {
+            self.grid.lock.lock();
+            self.writer_locked.set();
+            // Bound a regressed getter on the calling thread. A successful
+            // getter must return before this fallback releases the writer.
+            self.release_writer.timedWait(std.time.ns_per_s) catch {};
+            self.writer_released.store(true, .release);
+            self.grid.lock.unlock();
+        }
+    };
+
+    // The API reads only main-owned scalar state. Keep the real renderer grid
+    // pointer valid so a mutation taking its shared lock exercises contention.
+    var grid: SharedGrid = undefined;
+    grid.lock = .{};
+    var surface: apprt.embedded.Surface = undefined;
+    surface.core_surface.font_size = .{ .points = 13.5, .xdpi = 144, .ydpi = 144 };
+    surface.core_surface.renderer.font_grid = &grid;
+    var harness: Harness = .{ .grid = &grid };
+    const writer = try std.Thread.spawn(.{}, Harness.write, .{&harness});
+    defer {
+        harness.release_writer.set();
+        writer.join();
+    }
+    try harness.writer_locked.timedWait(std.time.ns_per_s);
+
+    try std.testing.expectEqual(@as(f32, 13.5), ghostty_surface_font_size(&surface));
+    surface.core_surface.font_size = .{ .points = 18.75, .xdpi = 72, .ydpi = 72 };
+    try std.testing.expectEqual(@as(f32, 18.75), ghostty_surface_font_size(&surface));
+    try std.testing.expectEqual(@as(f32, 0), ghostty_surface_font_size(null));
+    try std.testing.expect(!harness.writer_released.load(.acquire));
+}
+
 /// Borrows the callback's live clipboard request without consuming it. The C
 /// enum output is an int, independent of the internal union tag's storage.
 export fn ghostty_clipboard_request_get_type(

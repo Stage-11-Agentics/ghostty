@@ -1156,6 +1156,10 @@ void ghostty_surface_free(ghostty_surface_t);
 void* ghostty_surface_userdata(ghostty_surface_t);
 ghostty_app_t ghostty_surface_app(ghostty_surface_t);
 ghostty_surface_config_s ghostty_surface_inherited_config(ghostty_surface_t, ghostty_surface_context_e);
+// Call on the app thread with a live surface. Returns its current requested
+// font size in points, independent of display scale or pending renderer work.
+// Does not access font faces or take the font-grid lock. Returns 0 for null.
+float ghostty_surface_font_size(ghostty_surface_t);
 void ghostty_surface_update_config(ghostty_surface_t, ghostty_config_t);
 bool ghostty_surface_needs_confirm_quit(ghostty_surface_t);
 bool ghostty_surface_process_exited(ghostty_surface_t);
