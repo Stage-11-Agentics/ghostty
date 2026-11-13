@@ -43,6 +43,13 @@ const DisplayLink = switch (builtin.os.tag) {
 
 const log = std.log.scoped(.generic_renderer);
 
+/// Surface creation already holds a SharedGridSet reference to this grid.
+/// Metrics are immutable after SharedGrid.init, just as in setFontGrid below;
+/// reading them must not wait for another renderer loading or rasterizing fonts.
+fn initialGridMetrics(grid: *font.SharedGrid) font.Metrics {
+    return grid.metrics;
+}
+
 /// Create a renderer type with the provided graphics API wrapper.
 ///
 /// The graphics API wrapper must provide the interface outlined below.
@@ -151,7 +158,6 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// to determine if any possible changes have been made to the
         /// cells for the draw call.
         cells_rebuilt: bool = false,
-
 
         /// The current GPU uniform values.
         uniforms: shaderpkg.Uniforms,
@@ -692,17 +698,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             });
             errdefer font_shaper.deinit();
 
-            // Initialize all the data that requires a critical font section.
-            const font_critical: struct {
-                metrics: font.Metrics,
-            } = font_critical: {
-                const grid: *font.SharedGrid = options.font_grid;
-                grid.lock.lockShared();
-                defer grid.lock.unlockShared();
-                break :font_critical .{
-                    .metrics = grid.metrics,
-                };
-            };
+            const grid_metrics = initialGridMetrics(options.font_grid);
 
             const display_link: ?DisplayLink = switch (builtin.os.tag) {
                 .macos => if (options.config.vsync)
@@ -717,7 +713,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 .alloc = alloc,
                 .config = options.config,
                 .surface_mailbox = options.surface_mailbox,
-                .grid_metrics = font_critical.metrics,
+                .grid_metrics = grid_metrics,
                 .size = options.size,
                 .focused = true,
                 .scrollbar = .zero,
@@ -3529,4 +3525,59 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             try texture.replaceRegion(0, 0, atlas.size, atlas.size, atlas.data);
         }
     };
+}
+
+test "surface creation metrics do not wait for the font grid writer" {
+    const Harness = struct {
+        grid: *font.SharedGrid,
+        writer_locked: std.Thread.ResetEvent = .{},
+        release_writer: std.Thread.ResetEvent = .{},
+        read_done: std.Thread.ResetEvent = .{},
+        actual: font.Metrics = undefined,
+
+        fn write(self: *@This()) void {
+            self.grid.lock.lock();
+            defer self.grid.lock.unlock();
+            self.writer_locked.set();
+            self.release_writer.wait();
+        }
+
+        fn read(self: *@This()) void {
+            self.actual = initialGridMetrics(self.grid);
+            self.read_done.set();
+        }
+    };
+
+    var expected = std.mem.zeroes(font.Metrics);
+    expected.cell_width = 9;
+    expected.cell_height = 17;
+    expected.cell_baseline = 4;
+    expected.icon_height = 12.5;
+    // Only the lock and immutable metrics are used by this production seam.
+    // No font library, graphics context, or initialized atlas is needed.
+    var grid: font.SharedGrid = undefined;
+    grid.metrics = expected;
+    grid.lock = .{};
+    var harness: Harness = .{ .grid = &grid };
+
+    const writer = try std.Thread.spawn(.{}, Harness.write, .{&harness});
+    defer {
+        harness.release_writer.set();
+        writer.join();
+    }
+    try harness.writer_locked.timedWait(std.time.ns_per_s);
+
+    const reader = try std.Thread.spawn(.{}, Harness.read, .{&harness});
+    defer {
+        // A regressed read may be waiting on the writer. Release before joining
+        // even when the assertion fails, so the regression cannot hang the suite.
+        harness.release_writer.set();
+        reader.join();
+    }
+    const completed_while_locked = complete: {
+        harness.read_done.timedWait(100 * std.time.ns_per_ms) catch break :complete false;
+        break :complete true;
+    };
+    try std.testing.expect(completed_while_locked);
+    try std.testing.expectEqualDeep(expected, harness.actual);
 }
