@@ -287,9 +287,17 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             }
 
             pub fn deinit(self: *SwapChain) void {
-                // Wait for all of our inflight draws to complete
-                // so that we can cleanly deinit our GPU state.
+                self.waitIdle();
+                self.freeFrames();
+            }
+
+            /// Wait for all of our inflight draws to complete so that we
+            /// can cleanly deinit our GPU state. Follow with `freeFrames`.
+            fn waitIdle(self: *SwapChain) void {
                 for (0..buf_count) |_| self.frame_sema.wait();
+            }
+
+            fn freeFrames(self: *SwapChain) void {
                 for (&self.frames) |*frame| frame.deinit();
             }
 
@@ -1117,9 +1125,15 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             defer self.draw_mutex.unlock();
 
             if (self.swap_chain) |*sc| {
-                // Waits for any in-flight frames to complete, then
-                // frees all GPU resources.
-                sc.deinit();
+                // Wait for any in-flight frames to complete: completing
+                // one presents its target. The target now presented keeps
+                // its pixels for the layer and `presentLastTarget`; the
+                // rest are freed and discarded.
+                sc.waitIdle();
+                if (comptime @hasDecl(GraphicsAPI, "keepPresentedContents")) {
+                    for (&sc.frames) |*frame| self.api.keepPresentedContents(&frame.target);
+                }
+                sc.freeFrames();
                 self.swap_chain = null;
 
                 // Let the API drop any references it holds to swap

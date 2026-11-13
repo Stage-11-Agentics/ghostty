@@ -302,6 +302,13 @@ pub inline fn present(self: *Metal, target: Target, sync: bool) !void {
     }
 }
 
+/// The renderer is about to free `target` while this surface may be shown
+/// again (a hidden surface releasing its swap chain). The surface kept for
+/// `presentLastTarget` must keep its pixels, so its target only releases it.
+pub fn keepPresentedContents(self: *const Metal, target: *Target) void {
+    if (self.last_surface == target.surface) target.keep_contents = true;
+}
+
 /// Present the last presented target again.
 pub inline fn presentLastTarget(self: *Metal) !void {
     const surface = self.last_surface orelse return;

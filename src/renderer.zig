@@ -63,4 +63,5 @@ test {
     _ = size;
     _ = Thread;
     _ = State;
+    if (comptime @import("builtin").os.tag.isDarwin()) _ = @import("renderer/metal/Target.zig");
 }
