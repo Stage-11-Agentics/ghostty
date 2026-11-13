@@ -963,7 +963,7 @@ pub const Surface = struct {
     pub fn newSurfaceOptions(self: *const Surface, context: apprt.surface.NewSurfaceContext) apprt.Surface.Options {
         const font_size: f32 = font_size: {
             if (!self.app.config.@"window-inherit-font-size") break :font_size 0;
-            break :font_size self.core_surface.font_size.points;
+            break :font_size self.core_surface.fontSizePoints();
         };
 
         const working_directory: ?[*:0]const u8 = wd: {
@@ -1619,6 +1619,12 @@ pub const CAPI = struct {
         source: apprt.surface.NewSurfaceContext,
     ) Surface.Options {
         return surface.newSurfaceOptions(source);
+    }
+
+    /// Call on the app thread with a live surface. No renderer/font-grid lock.
+    export fn ghostty_surface_font_size(surface: ?*const Surface) f32 {
+        const ptr = surface orelse return 0;
+        return ptr.core_surface.fontSizePoints();
     }
 
     /// Update the configuration to the provided config for only this surface.

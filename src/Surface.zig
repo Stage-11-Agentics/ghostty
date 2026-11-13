@@ -2461,6 +2461,13 @@ fn setCellSize(self: *Surface, size: rendererpkg.CellSize) !void {
     );
 }
 
+/// Current requested font size in points, independent of display scale.
+/// Call only on the app thread, which owns font_size. The renderer's font face
+/// can lag size changes and needs a shared lock; inheritance needs this scalar.
+pub fn fontSizePoints(self: *const Surface) f32 {
+    return self.font_size.points;
+}
+
 /// Change the font size.
 ///
 /// This can only be called from the main thread.
@@ -6888,4 +6895,43 @@ test "Surface: rectangle selection logic" {
         9, 2, // expected end
         true, //rectangle selection
     );
+}
+
+test "surface font size reads main-owned points without the font grid lock" {
+    const Harness = struct {
+        grid: *font.SharedGrid,
+        writer_locked: std.Thread.ResetEvent = .{},
+        release_writer: std.Thread.ResetEvent = .{},
+        writer_released: std.atomic.Value(bool) = .init(false),
+
+        fn write(self: *@This()) void {
+            self.grid.lock.lock();
+            self.writer_locked.set();
+            // Bound a regressed getter on the calling thread. A successful
+            // getter must return before this fallback releases the writer.
+            self.release_writer.timedWait(std.time.ns_per_s) catch {};
+            self.writer_released.store(true, .release);
+            self.grid.lock.unlock();
+        }
+    };
+
+    // The production getter reads only main-owned scalar state. Keep the real
+    // renderer grid pointer valid so a shared-lock mutation exercises contention.
+    var grid: font.SharedGrid = undefined;
+    grid.lock = .{};
+    var surface: Surface = undefined;
+    surface.font_size = .{ .points = 13.5, .xdpi = 144, .ydpi = 144 };
+    surface.renderer.font_grid = &grid;
+    var harness: Harness = .{ .grid = &grid };
+    const writer = try std.Thread.spawn(.{}, Harness.write, .{&harness});
+    defer {
+        harness.release_writer.set();
+        writer.join();
+    }
+    try harness.writer_locked.timedWait(std.time.ns_per_s);
+
+    try std.testing.expectEqual(@as(f32, 13.5), surface.fontSizePoints());
+    surface.font_size = .{ .points = 18.75, .xdpi = 72, .ydpi = 72 };
+    try std.testing.expectEqual(@as(f32, 18.75), surface.fontSizePoints());
+    try std.testing.expect(!harness.writer_released.load(.acquire));
 }
