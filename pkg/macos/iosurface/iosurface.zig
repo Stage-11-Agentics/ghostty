@@ -63,10 +63,11 @@ pub const IOSurface = opaque {
     }
 
     /// Set the purgeable state (`kIOSurfacePurgeable*`) and return the
-    /// previous one. `kIOSurfacePurgeableKeepCurrent` only reads it.
-    pub fn setPurgeable(self: *IOSurface, state: u32) u32 {
+    /// previous one, or null if the call failed.
+    /// `kIOSurfacePurgeableKeepCurrent` only reads it.
+    pub fn setPurgeable(self: *IOSurface, state: u32) ?u32 {
         var old: u32 = 0;
-        _ = c.IOSurfaceSetPurgeable(@ptrCast(self), state, &old);
+        if (c.IOSurfaceSetPurgeable(@ptrCast(self), state, &old) != 0) return null;
         return old;
     }
 

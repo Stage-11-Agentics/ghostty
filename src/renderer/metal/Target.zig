@@ -127,15 +127,21 @@ pub fn deinit(self: *Self) void {
 /// A hidden terminal's kept frame stays in memory, off the footprint:
 /// volatile purgeable memory is not charged to the process, and macOS
 /// discards it only under memory pressure.
-pub fn keepFrameVolatile(surface: *IOSurface) void {
-    _ = surface.setPurgeable(macos.iosurface.c.kIOSurfacePurgeableVolatile);
+pub fn keepFrameVolatile(surface: *IOSurface) bool {
+    if (surface.setPurgeable(macos.iosurface.c.kIOSurfacePurgeableVolatile) == null) {
+        log.warn("could not mark the kept frame volatile; it stays on the footprint", .{});
+        return false;
+    }
+    return true;
 }
 
 /// Make a kept frame non-volatile again before it is shown. Returns false
 /// when macOS discarded it while it was volatile: its pixels are gone.
 pub fn restoreKeptFrame(surface: *IOSurface) bool {
     const c = macos.iosurface.c;
-    return surface.setPurgeable(c.kIOSurfacePurgeableNonVolatile) != c.kIOSurfacePurgeableEmpty;
+    // A failed call leaves the state as it was; keep the frame.
+    const old = surface.setPurgeable(c.kIOSurfacePurgeableNonVolatile) orelse return true;
+    return old != c.kIOSurfacePurgeableEmpty;
 }
 
 /// Test seam: make the texture allocation fail as if Metal returned nil.
@@ -228,7 +234,7 @@ test "a kept frame is volatile while hidden and non-volatile with its pixels whe
     target.keep_contents = true;
     target.deinit();
 
-    keepFrameVolatile(surface);
+    try std.testing.expect(keepFrameVolatile(surface));
     try std.testing.expectEqual(@as(u32, c.kIOSurfacePurgeableVolatile), purgeState(surface));
     try std.testing.expect(restoreKeptFrame(surface));
     try std.testing.expectEqual(@as(u32, c.kIOSurfacePurgeableNonVolatile), purgeState(surface));
@@ -247,7 +253,7 @@ test "a kept frame discarded while hidden reports it on show" {
     target.keep_contents = true;
     target.deinit();
 
-    keepFrameVolatile(surface);
+    try std.testing.expect(keepFrameVolatile(surface));
     // Stand-in for macOS discarding it under memory pressure.
     _ = surface.setPurgeable(c.kIOSurfacePurgeableEmpty);
     try std.testing.expect(!restoreKeptFrame(surface));

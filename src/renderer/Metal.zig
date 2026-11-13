@@ -69,6 +69,10 @@ autorelease_pool: ?*objc.AutoreleasePool = null,
 /// before the terminal has rebuilt its cell buffers for the new size.
 last_surface: ?*IOSurface = null,
 
+/// True while `last_surface` is the volatile kept frame of a hidden surface
+/// (`hideKeptFrame`); `showKeptFrame` restores it.
+kept_frame_volatile: bool = false,
+
 pub fn init(alloc: Allocator, opts: rendererpkg.Options) !Metal {
     comptime switch (builtin.os.tag) {
         .macos, .ios => {},
@@ -313,18 +317,22 @@ pub fn keepPresentedContents(self: *const Metal, target: *Target) void {
 /// memory but off the footprint until the surface is shown again.
 pub fn hideKeptFrame(self: *Metal) void {
     const surface = self.last_surface orelse return;
-    Target.keepFrameVolatile(surface);
+    self.kept_frame_volatile = Target.keepFrameVolatile(surface);
 }
 
-/// The surface is being shown: make the kept frame non-volatile again. If
-/// macOS discarded it under memory pressure, drop it, so it is never
-/// re-presented; the regain draw shows current content a frame later.
-pub fn showKeptFrame(self: *Metal) void {
-    const surface = self.last_surface orelse return;
-    if (!Target.restoreKeptFrame(surface)) {
-        surface.release();
-        self.last_surface = null;
-    }
+/// The surface is being shown: make the kept frame non-volatile again.
+/// Returns false if macOS discarded it under memory pressure. It is then
+/// dropped, so `presentLastTarget` never re-presents it; the regain draw
+/// shows current content a frame or two later. Until then the layer may
+/// still composite the emptied surface, as upstream does on every show.
+pub fn showKeptFrame(self: *Metal) bool {
+    if (!self.kept_frame_volatile) return true;
+    self.kept_frame_volatile = false;
+    const surface = self.last_surface orelse return true;
+    if (Target.restoreKeptFrame(surface)) return true;
+    surface.release();
+    self.last_surface = null;
+    return false;
 }
 
 /// Present the last presented target again.

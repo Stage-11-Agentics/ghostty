@@ -1110,7 +1110,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 if (visible) {
                     self.draw_mutex.lock();
                     defer self.draw_mutex.unlock();
-                    if (self.swap_chain == null) self.api.showKeptFrame();
+                    if (self.swap_chain == null and !self.api.showKeptFrame()) {
+                        // Nothing to replay on a sync resize; the next draw is real.
+                        self.has_presented.store(false, .monotonic);
+                    }
                 }
             }
         }
