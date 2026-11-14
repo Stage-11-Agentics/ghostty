@@ -1154,10 +1154,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // Only while released: with no swap chain no frame is in
             // flight, so no completing frame can replace the kept frame.
             if (self.swap_chain != null) return;
+            // `has_presented` stays set: a sync draw on a bounds change
+            // then takes the replay path, which presents nothing without
+            // a kept frame, instead of drawing on the main thread.
             if (comptime @hasDecl(GraphicsAPI, "releaseKeptFrame")) {
                 self.api.releaseKeptFrame();
-                // Nothing to replay on a sync resize until the next draw.
-                self.has_presented.store(false, .monotonic);
             }
         }
 

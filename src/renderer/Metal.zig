@@ -315,8 +315,8 @@ pub fn keepPresentedContents(self: *const Metal, target: *Target) void {
 pub fn releaseKeptFrame(self: *Metal) void {
     const surface = self.last_surface orelse return;
     self.last_surface = null;
-    surface.release();
-    self.layer.clearContents();
+    // Hands `last_surface`'s reference to the clear, which releases it.
+    self.layer.clearContents(surface);
 }
 
 /// Present the last presented target again.

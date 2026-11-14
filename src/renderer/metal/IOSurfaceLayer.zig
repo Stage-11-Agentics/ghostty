@@ -101,12 +101,15 @@ pub inline fn setSurfaceUnchecked(self: *IOSurfaceLayer, surface: *IOSurface) !v
     }
 }
 
-/// Clears the layer's `contents`, releasing the layer's reference to the
-/// last frame. Runs on the main thread (dispatched in order with
-/// `setSurface`), so a frame presented later still lands after it.
-pub inline fn clearContents(self: *IOSurfaceLayer) void {
+/// Clears the layer's `contents` if it still shows `surface`, releasing the
+/// layer's reference to that frame. Runs on the main thread. A frame
+/// presented meanwhile (a sync draw sets `contents` directly, outside the
+/// dispatch order) is left in place. Takes ownership of one reference to
+/// `surface` and releases it.
+pub inline fn clearContents(self: *IOSurfaceLayer, surface: *IOSurface) void {
     var block = ClearContentsBlock.init(.{
         .layer = self.layer.value,
+        .surface = surface,
     }, &clearContentsCallback);
 
     const NSThread = objc.getClass("NSThread").?;
@@ -122,12 +125,18 @@ pub inline fn clearContents(self: *IOSurfaceLayer) void {
 
 const ClearContentsBlock = objc.Block(struct {
     layer: objc.c.id,
+    surface: *IOSurface,
 }, .{}, void);
 
 fn clearContentsCallback(
     block: *const ClearContentsBlock.Context,
 ) callconv(.c) void {
     const layer = objc.Object.fromId(block.layer);
+    const surface: *IOSurface = block.surface;
+    defer surface.release();
+
+    const contents = layer.msgSend(?*anyopaque, objc.sel("contents"), .{});
+    if (contents != @as(?*anyopaque, @ptrCast(surface))) return;
     layer.msgSend(void, objc.sel("setContents:"), .{@as(?*anyopaque, null)});
 }
 

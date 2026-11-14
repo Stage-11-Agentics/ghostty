@@ -702,6 +702,19 @@ fn syncKeptFrameTimer(self: *Thread, visible: bool) void {
                 self,
                 keptFrameTimerCallback,
             );
+        } else if (self.kept_frame_c_cancel.state() == .active) {
+            // Hidden again before a show's cancel has run (both in one
+            // loop tick): reset re-adds the timer when that cancel lands,
+            // instead of letting it fire `Canceled` and leave none.
+            self.kept_frame_h.reset(
+                &self.loop,
+                &self.kept_frame_c,
+                &self.kept_frame_c_cancel,
+                kept_frame_release_ms,
+                Thread,
+                self,
+                keptFrameTimerCallback,
+            );
         }
     } else if (self.kept_frame_c.state() == .active and
         self.kept_frame_c_cancel.state() == .dead)
