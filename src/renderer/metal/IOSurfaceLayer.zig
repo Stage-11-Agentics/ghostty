@@ -101,6 +101,36 @@ pub inline fn setSurfaceUnchecked(self: *IOSurfaceLayer, surface: *IOSurface) !v
     }
 }
 
+/// Clears the layer's `contents`, releasing the layer's reference to the
+/// last frame. Runs on the main thread (dispatched in order with
+/// `setSurface`), so a frame presented later still lands after it.
+pub inline fn clearContents(self: *IOSurfaceLayer) void {
+    var block = ClearContentsBlock.init(.{
+        .layer = self.layer.value,
+    }, &clearContentsCallback);
+
+    const NSThread = objc.getClass("NSThread").?;
+    if (NSThread.msgSend(bool, "isMainThread", .{})) {
+        clearContentsCallback(&block);
+    } else {
+        macos.dispatch.dispatch_async(
+            @ptrCast(macos.dispatch.queue.getMain()),
+            @ptrCast(&block),
+        );
+    }
+}
+
+const ClearContentsBlock = objc.Block(struct {
+    layer: objc.c.id,
+}, .{}, void);
+
+fn clearContentsCallback(
+    block: *const ClearContentsBlock.Context,
+) callconv(.c) void {
+    const layer = objc.Object.fromId(block.layer);
+    layer.msgSend(void, objc.sel("setContents:"), .{@as(?*anyopaque, null)});
+}
+
 /// Sets the layer's `contents` to the provided IOSurface.
 ///
 /// Does not ensure this happens on the main thread.

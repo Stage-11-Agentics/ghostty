@@ -1140,6 +1140,27 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             }
         }
 
+        /// Release the kept frame of a surface that has stayed hidden
+        /// since its swap chain was released (`Thread.kept_frame_release_ms`).
+        /// Showing it later draws its first frame from scratch on the
+        /// renderer thread; nothing redraws synchronously on the main
+        /// thread (a sync draw with no swap chain re-presents only).
+        ///
+        /// Must be called on the render thread.
+        pub fn releaseKeptFrame(self: *Self) void {
+            self.draw_mutex.lock();
+            defer self.draw_mutex.unlock();
+
+            // Only while released: with no swap chain no frame is in
+            // flight, so no completing frame can replace the kept frame.
+            if (self.swap_chain != null) return;
+            if (comptime @hasDecl(GraphicsAPI, "releaseKeptFrame")) {
+                self.api.releaseKeptFrame();
+                // Nothing to replay on a sync resize until the next draw.
+                self.has_presented.store(false, .monotonic);
+            }
+        }
+
         /// Set the new font grid.
         ///
         /// Must be called on the render thread.

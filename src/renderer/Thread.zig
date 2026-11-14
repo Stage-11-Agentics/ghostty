@@ -63,6 +63,12 @@ cursor_h: xev.Timer,
 cursor_c: xev.Completion = .{},
 cursor_c_cancel: xev.Completion = .{},
 
+/// The timer that releases a hidden surface's kept frame once it has been
+/// hidden for `kept_frame_release_ms` (see `renderer.releaseKeptFrame`).
+kept_frame_h: xev.Timer,
+kept_frame_c: xev.Completion = .{},
+kept_frame_c_cancel: xev.Completion = .{},
+
 /// The surface we're rendering to.
 surface: *apprt.Surface,
 
@@ -152,6 +158,10 @@ pub fn init(
     var cursor_timer = try xev.Timer.init();
     errdefer cursor_timer.deinit();
 
+    // The kept-frame release timer, see comments.
+    var kept_frame_h = try xev.Timer.init();
+    errdefer kept_frame_h.deinit();
+
     // The mailbox for messaging this thread
     var mailbox = try Mailbox.create(alloc);
     errdefer mailbox.destroy(alloc);
@@ -166,6 +176,7 @@ pub fn init(
         .draw_h = draw_h,
         .draw_now = draw_now,
         .cursor_h = cursor_timer,
+        .kept_frame_h = kept_frame_h,
         .surface = surface,
         .renderer = renderer_impl,
         .state = state,
@@ -183,6 +194,7 @@ pub fn deinit(self: *Thread) void {
     self.draw_h.deinit();
     self.draw_now.deinit();
     self.cursor_h.deinit();
+    self.kept_frame_h.deinit();
     self.loop.deinit();
 
     // Nothing can possibly access the mailbox anymore, destroy it.
@@ -464,6 +476,10 @@ fn applyVisible(self: *Thread, v: bool) void {
     // rebuilds them only once it knows it is visible again.
     self.renderer.setVisible(v);
 
+    // A hidden surface keeps its last frame for a short while, so a quick
+    // switch back shows it at once; after that the frame is released.
+    self.syncKeptFrameTimer(v);
+
     // If we became visible then we immediately rebuild cells
     // (renderCallback skips updateFrame while invisible) and draw.
     if (v) {
@@ -667,6 +683,76 @@ fn renderCallback(
     // Draw
     t.drawFrame(false);
 
+    return .disarm;
+}
+
+/// How long a hidden surface keeps its last frame before releasing it.
+/// Switching back within this shows the kept frame at once; after it, the
+/// surface shows its background until the renderer's first draw lands.
+pub const kept_frame_release_ms: u64 = 30_000;
+
+fn syncKeptFrameTimer(self: *Thread, visible: bool) void {
+    if (!visible) {
+        if (self.kept_frame_c.state() != .active) {
+            self.kept_frame_h.run(
+                &self.loop,
+                &self.kept_frame_c,
+                kept_frame_release_ms,
+                Thread,
+                self,
+                keptFrameTimerCallback,
+            );
+        }
+    } else if (self.kept_frame_c.state() == .active and
+        self.kept_frame_c_cancel.state() == .dead)
+    {
+        self.kept_frame_h.cancel(
+            &self.loop,
+            &self.kept_frame_c,
+            &self.kept_frame_c_cancel,
+            void,
+            null,
+            keptFrameCancelCallback,
+        );
+    }
+}
+
+fn keptFrameTimerCallback(
+    self_: ?*Thread,
+    _: *xev.Loop,
+    _: *xev.Completion,
+    r: xev.Timer.RunError!void,
+) xev.CallbackAction {
+    _ = r catch |err| switch (err) {
+        // Canceled when the surface was shown again. That's fine.
+        error.Canceled => return .disarm,
+        else => {
+            log.warn("error in kept frame timer callback err={}", .{err});
+            return .disarm;
+        },
+    };
+    const t: *Thread = self_ orelse return .disarm;
+    if (!t.flags.visible) t.renderer.releaseKeptFrame();
+    return .disarm;
+}
+
+fn keptFrameCancelCallback(
+    _: ?*void,
+    _: *xev.Loop,
+    _: *xev.Completion,
+    r: xev.Timer.CancelError!void,
+) xev.CallbackAction {
+    // Unify the platforms' error sets, as cursorCancelCallback does.
+    const CancelError = xev.Timer.CancelError || error{
+        Canceled,
+        NotFound,
+        Unexpected,
+    };
+    _ = r catch |err| switch (@as(CancelError, @errorCast(err))) {
+        error.Canceled => {}, // success
+        error.NotFound => {}, // completed before it could cancel
+        else => log.warn("error in kept frame cancel callback err={}", .{err}),
+    };
     return .disarm;
 }
 

@@ -309,6 +309,16 @@ pub fn keepPresentedContents(self: *const Metal, target: *Target) void {
     if (self.last_surface == target.surface) target.keep_contents = true;
 }
 
+/// Release the kept frame of a surface that has stayed hidden: drop
+/// `last_surface` and the layer's reference, so the frame's memory is freed.
+/// The surface then shows the layer background until its next draw.
+pub fn releaseKeptFrame(self: *Metal) void {
+    const surface = self.last_surface orelse return;
+    self.last_surface = null;
+    surface.release();
+    self.layer.clearContents();
+}
+
 /// Present the last presented target again.
 pub inline fn presentLastTarget(self: *Metal) !void {
     const surface = self.last_surface orelse return;
