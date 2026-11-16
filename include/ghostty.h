@@ -1211,6 +1211,11 @@ void ghostty_surface_mouse_pos(ghostty_surface_t,
                                double,
                                double,
                                ghostty_input_mods_e);
+uintptr_t ghostty_surface_hyperlink_at(ghostty_surface_t,
+                                       double,
+                                       double,
+                                       char*,
+                                       uintptr_t);
 void ghostty_surface_mouse_scroll(ghostty_surface_t,
                                   double,
                                   double,

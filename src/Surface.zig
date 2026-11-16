@@ -4692,6 +4692,43 @@ fn openUrl(
     );
 }
 
+/// Copy the OSC 8 URI of the cell under a surface position (pixels) into
+/// `buf`. Returns the URI's full byte length, or 0 when the cell has no
+/// hyperlink or the position is outside the viewport; copies at most
+/// `buf.len` bytes, so a return above `buf.len` means truncated.
+///
+/// Read-only: no link hover, selection, render or mouse report changes, so
+/// an embedder may ask while the program holds the mouse.
+pub fn hyperlinkAtPos(self: *Surface, pos: apprt.CursorPos, buf: []u8) usize {
+    if (pos.x < 0 or pos.y < 0) return 0;
+    self.renderer_state.mutex.lock();
+    defer self.renderer_state.mutex.unlock();
+    return copyHyperlinkAtViewport(
+        self.renderer_state.terminal.screens.active,
+        self.posToViewport(pos.x, pos.y),
+        buf,
+    );
+}
+
+/// The OSC 8 URI of the cell at a viewport point, copied into `buf` as for
+/// `hyperlinkAtPos`. The URI borrows page memory, so the caller holds the
+/// renderer mutex.
+fn copyHyperlinkAtViewport(
+    screen: *terminal.Screen,
+    pt: terminal.point.Coordinate,
+    buf: []u8,
+) usize {
+    const pin = screen.pages.pin(.{ .viewport = pt }) orelse return 0;
+    const cell = pin.rowAndCell().cell;
+    if (!cell.hyperlink) return 0;
+    const page = &pin.node.data;
+    const link_id = page.lookupHyperlink(cell) orelse return 0;
+    const uri = page.hyperlink_set.get(page.memory, link_id).uri.slice(page.memory);
+    const n = @min(uri.len, buf.len);
+    @memcpy(buf[0..n], uri[0..n]);
+    return uri.len;
+}
+
 /// Return the URI for an OSC8 hyperlink at the given position or null
 /// if there is no hyperlink.
 fn osc8URI(self: *Surface, pin: terminal.Pin) ?[]const u8 {
@@ -6934,4 +6971,44 @@ test "surface font size reads main-owned points without the font grid lock" {
     surface.font_size = .{ .points = 18.75, .xdpi = 72, .ydpi = 72 };
     try std.testing.expectEqual(@as(f32, 18.75), surface.fontSizePoints());
     try std.testing.expect(!harness.writer_released.load(.acquire));
+}
+
+test "hyperlink at viewport copies the OSC 8 URI under a cell" {
+    const testing = std.testing;
+    var t = try terminal.Terminal.init(testing.allocator, .{ .cols = 10, .rows = 3 });
+    defer t.deinit(testing.allocator);
+
+    // Row 0: "ab" plain, "cd" linked, "ef" plain. Row 1: "g" linked to another URI.
+    try t.printString("ab");
+    try t.screens.active.startHyperlink("c11://panel/x", null);
+    try t.printString("cd");
+    t.screens.active.endHyperlink();
+    try t.printString("ef");
+    t.carriageReturn();
+    try t.linefeed();
+    try t.screens.active.startHyperlink("https://example.com", null);
+    try t.printString("g");
+    t.screens.active.endHyperlink();
+
+    const screen = t.screens.active;
+    var buf: [64]u8 = undefined;
+
+    try testing.expectEqual(@as(usize, 0), copyHyperlinkAtViewport(screen, .{ .x = 1, .y = 0 }, &buf));
+    for ([_]u16{ 2, 3 }) |x| {
+        const n = copyHyperlinkAtViewport(screen, .{ .x = x, .y = 0 }, &buf);
+        try testing.expectEqualStrings("c11://panel/x", buf[0..n]);
+    }
+    try testing.expectEqual(@as(usize, 0), copyHyperlinkAtViewport(screen, .{ .x = 4, .y = 0 }, &buf));
+    const row1 = copyHyperlinkAtViewport(screen, .{ .x = 0, .y = 1 }, &buf);
+    try testing.expectEqualStrings("https://example.com", buf[0..row1]);
+    try testing.expectEqual(@as(usize, 0), copyHyperlinkAtViewport(screen, .{ .x = 0, .y = 2 }, &buf));
+    try testing.expectEqual(@as(usize, 0), copyHyperlinkAtViewport(screen, .{ .x = 0, .y = 99 }, &buf));
+    try testing.expectEqual(@as(usize, 0), copyHyperlinkAtViewport(screen, .{ .x = 99, .y = 0 }, &buf));
+
+    // A short buffer gets a prefix and the full length, so a caller can tell
+    // a truncated URI from a whole one. An empty buffer only measures.
+    var short: [4]u8 = undefined;
+    try testing.expectEqual(@as(usize, 13), copyHyperlinkAtViewport(screen, .{ .x = 2, .y = 0 }, &short));
+    try testing.expectEqualStrings("c11:", &short);
+    try testing.expectEqual(@as(usize, 13), copyHyperlinkAtViewport(screen, .{ .x = 2, .y = 0 }, &.{}));
 }

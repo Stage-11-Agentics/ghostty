@@ -2070,6 +2070,26 @@ pub const CAPI = struct {
         );
     }
 
+    /// The OSC 8 URI of the cell under a view position, in the same
+    /// unscaled coordinates as ghostty_surface_mouse_pos. Returns the URI's
+    /// byte length (0 for none) and copies at most `cap` bytes into `buf`;
+    /// a null buffer only measures. Read-only: nothing is reported to the
+    /// program and no link, selection or mouse state changes.
+    export fn ghostty_surface_hyperlink_at(
+        surface: *Surface,
+        x: f64,
+        y: f64,
+        buf: ?[*]u8,
+        cap: usize,
+    ) usize {
+        const pos = surface.cursorPosToPixels(.{
+            .x = @floatCast(x),
+            .y = @floatCast(y),
+        }) catch return 0;
+        const out: []u8 = if (buf) |ptr| ptr[0..cap] else &.{};
+        return surface.core_surface.hyperlinkAtPos(pos, out);
+    }
+
     export fn ghostty_surface_mouse_scroll(
         surface: *Surface,
         x: f64,
