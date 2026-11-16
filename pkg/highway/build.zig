@@ -91,9 +91,18 @@ pub fn build(b: *std.Build) !void {
 
     lib.addCSourceFiles(.{ .flags = flags.items, .files = &.{"bridge.cpp"} });
     if (upstream_) |upstream| {
+        // HWY_ABORT bakes __FILE__ into the binary. The package lives in the
+        // zig global cache under the builder's home, so map its root to a
+        // fixed name and no builder path ships (c11, C11H-133).
+        var upstream_flags: std.ArrayList([]const u8) = .empty;
+        defer upstream_flags.deinit(b.allocator);
+        try upstream_flags.appendSlice(b.allocator, flags.items);
+        if (upstream.builder.build_root.path) |root| {
+            try upstream_flags.append(b.allocator, b.fmt("-ffile-prefix-map={s}=highway", .{root}));
+        }
         lib.addCSourceFiles(.{
             .root = upstream.path(""),
-            .flags = flags.items,
+            .flags = upstream_flags.items,
             .files = &.{
                 "hwy/abort.cc",
                 "hwy/aligned_allocator.cc",
