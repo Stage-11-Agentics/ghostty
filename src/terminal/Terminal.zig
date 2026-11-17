@@ -78,6 +78,14 @@ modes: modespkg.ModeState = .{},
 /// The most recently set mouse shape for the terminal.
 mouse_shape: mouse_shape_pkg.MouseShape = .text,
 
+/// When true, Kitty graphics accept only directly transmitted data
+/// (`t=d`): file, temporary-file and shared-memory media are refused
+/// before any file-system access, with the same reply for every path.
+/// An embedder sets this for a surface whose output it does not trust to
+/// name local paths. It is set once at creation and deliberately kept
+/// outside `flags`, so no reset (including a full reset) clears it.
+kitty_graphics_direct_only: bool = false,
+
 /// These are just a packed set of flags we may set on the terminal.
 flags: packed struct {
     // This supports a Kitty extension where programs using semantic

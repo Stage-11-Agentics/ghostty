@@ -703,6 +703,12 @@ pub fn init(
     // so we can just defer this and not the subcomponents.
     errdefer self.io.deinit();
 
+    // Set before any output is processed: the IO thread has not started and
+    // no embedder output has been fed yet. Nothing changes it afterwards.
+    if (comptime @hasDecl(apprt.runtime.Surface, "kittyGraphicsDirectOnly")) {
+        self.io.terminal.kitty_graphics_direct_only = rt_surface.kittyGraphicsDirectOnly();
+    }
+
     // Report initial cell size on surface creation
     _ = try rt_app.performAction(
         .{ .surface = self },

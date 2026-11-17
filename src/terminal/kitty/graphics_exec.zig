@@ -44,7 +44,7 @@ pub fn execute(
     var quiet = cmd.quiet;
 
     const resp_: ?Response = switch (cmd.control) {
-        .query => query(alloc, cmd),
+        .query => query(alloc, terminal, cmd),
         .display => display(alloc, terminal, cmd),
         .delete => delete(alloc, terminal, cmd),
 
@@ -94,7 +94,7 @@ pub fn execute(
 /// This command is used to attempt to load an image and respond with
 /// success/error but does not persist any of the command to the terminal
 /// state.
-fn query(alloc: Allocator, cmd: *const Command) Response {
+fn query(alloc: Allocator, terminal: *const Terminal, cmd: *const Command) Response {
     const t = cmd.control.query;
 
     // Query requires image ID. We can't actually send a response without
@@ -110,6 +110,13 @@ fn query(alloc: Allocator, cmd: *const Command) Response {
         .image_number = t.image_number,
         .placement_id = t.placement_id,
     };
+
+    // A path medium on a direct-only terminal is refused before any
+    // file-system call, so the reply is the same for every path.
+    if (refusesPathMedium(terminal, t)) {
+        encodeError(&result, error.UnsupportedMedium);
+        return result;
+    }
 
     // Attempt to load the image. If we cannot, then set an appropriate error.
     var loading = LoadingImage.init(alloc, cmd) catch |err| {
@@ -322,7 +329,11 @@ fn loadAndAddImage(
         }
 
         break :loading loading.*;
-    } else try .init(alloc, cmd);
+    } else loading: {
+        // Only a first chunk names a medium; continuation chunks are data.
+        if (refusesPathMedium(terminal, t)) return error.UnsupportedMedium;
+        break :loading try .init(alloc, cmd);
+    };
 
     // We only want to deinit on error. If we're chunking, then we don't
     // want to deinit at all. If we're not chunking, then we'll deinit
@@ -367,6 +378,16 @@ fn loadAndAddImage(
     loading.deinit(alloc);
 
     return .{ .image = img, .display = display_ };
+}
+
+/// True when a command would load image data from a path (a file, a
+/// temporary file or shared memory) on a terminal that accepts only
+/// directly transmitted data (`Terminal.kitty_graphics_direct_only`).
+/// Callers check this before `LoadingImage.init`, so a refused command
+/// resolves, opens, reads and unlinks nothing, and its reply carries only
+/// the command's own ids.
+fn refusesPathMedium(terminal: *const Terminal, t: command.Transmission) bool {
+    return terminal.kitty_graphics_direct_only and t.medium != .direct;
 }
 
 const EncodeableError = Image.Error || Allocator.Error;
@@ -567,4 +588,158 @@ test "kittygfx no response with no image ID or number load and display" {
         const resp = execute(alloc, &t, &cmd);
         try testing.expect(resp == null);
     }
+}
+
+const test_image_rgb = @embedFile("testdata/image-rgb-none-20x15-2147483647-raw.data");
+
+fn testPathCommand(
+    alloc: Allocator,
+    action: command.Command.Action,
+    medium: command.Transmission.Medium,
+    path: []const u8,
+) !Command {
+    const t: command.Transmission = .{
+        .format = .rgb,
+        .medium = medium,
+        .compression = .none,
+        .width = 20,
+        .height = 15,
+        .image_id = 31,
+    };
+    return .{
+        .control = switch (action) {
+            .query => .{ .query = t },
+            .transmit => .{ .transmit = t },
+            .transmit_and_display => .{ .transmit_and_display = .{
+                .transmission = t,
+                .display = .{ .image_id = 31 },
+            } },
+            else => unreachable,
+        },
+        .data = try alloc.dupe(u8, path),
+    };
+}
+
+test "kitty path media: a file query gets one reply for an existing and a missing path" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const TempDir = @import("../../os/TempDir.zig");
+
+    var tmp_dir = try TempDir.init();
+    defer tmp_dir.deinit();
+    try tmp_dir.dir.writeFile(.{ .sub_path = "present.data", .data = test_image_rgb });
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const present = try tmp_dir.dir.realpath("present.data", &buf);
+    const missing = "/c11-kitty-path-media-missing/image.data";
+
+    var t = try Terminal.init(alloc, .{ .rows = 5, .cols = 5 });
+    defer t.deinit(alloc);
+
+    // Without the switch the reply tells the two paths apart.
+    var open: [2]Response = undefined;
+    for ([_][]const u8{ present, missing }, 0..) |path, i| {
+        var cmd = try testPathCommand(alloc, .query, .file, path);
+        defer cmd.deinit(alloc);
+        open[i] = execute(alloc, &t, &cmd).?;
+    }
+    try testing.expect(open[0].ok());
+    try testing.expect(!open[1].ok());
+
+    // With it, both get the same reply.
+    t.kitty_graphics_direct_only = true;
+    var closed: [2]Response = undefined;
+    for ([_][]const u8{ present, missing }, 0..) |path, i| {
+        var cmd = try testPathCommand(alloc, .query, .file, path);
+        defer cmd.deinit(alloc);
+        closed[i] = execute(alloc, &t, &cmd).?;
+    }
+    try testing.expectEqualDeep(closed[0], closed[1]);
+    try testing.expectEqualStrings("EINVAL: unsupported medium", closed[0].message);
+    try testing.expectEqual(@as(u32, 31), closed[0].id);
+}
+
+test "kitty path media: a temporary file is refused and never unlinked" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const TempDir = @import("../../os/TempDir.zig");
+
+    var tmp_dir = try TempDir.init();
+    defer tmp_dir.deinit();
+    try tmp_dir.dir.writeFile(.{
+        .sub_path = "tty-graphics-protocol-image.data",
+        .data = test_image_rgb,
+    });
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try tmp_dir.dir.realpath("tty-graphics-protocol-image.data", &buf);
+
+    var t = try Terminal.init(alloc, .{ .rows = 5, .cols = 5 });
+    defer t.deinit(alloc);
+    t.kitty_graphics_direct_only = true;
+
+    for ([_]command.Command.Action{ .query, .transmit, .transmit_and_display }) |action| {
+        var cmd = try testPathCommand(alloc, action, .temporary_file, path);
+        defer cmd.deinit(alloc);
+        const resp = execute(alloc, &t, &cmd).?;
+        try testing.expectEqualStrings("EINVAL: unsupported medium", resp.message);
+        // Nothing was read or deleted: the file is still there.
+        try tmp_dir.dir.access(path, .{});
+    }
+    const storage = &t.screens.active.kitty_images;
+    try testing.expect(storage.imageById(31) == null);
+}
+
+test "kitty path media: files and shared memory are refused, nothing is stored" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const TempDir = @import("../../os/TempDir.zig");
+
+    var tmp_dir = try TempDir.init();
+    defer tmp_dir.deinit();
+    try tmp_dir.dir.writeFile(.{ .sub_path = "image.data", .data = test_image_rgb });
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try tmp_dir.dir.realpath("image.data", &buf);
+
+    var t = try Terminal.init(alloc, .{ .rows = 5, .cols = 5 });
+    defer t.deinit(alloc);
+    t.kitty_graphics_direct_only = true;
+
+    for ([_]command.Command.Action{ .transmit, .transmit_and_display }) |action| {
+        var cmd = try testPathCommand(alloc, action, .file, path);
+        defer cmd.deinit(alloc);
+        const resp = execute(alloc, &t, &cmd).?;
+        try testing.expectEqualStrings("EINVAL: unsupported medium", resp.message);
+    }
+    for ([_]command.Command.Action{ .query, .transmit }) |action| {
+        var cmd = try testPathCommand(alloc, action, .shared_memory, "/c11-kitty-path-media-shm");
+        defer cmd.deinit(alloc);
+        const resp = execute(alloc, &t, &cmd).?;
+        try testing.expectEqualStrings("EINVAL: unsupported medium", resp.message);
+    }
+    const storage = &t.screens.active.kitty_images;
+    try testing.expect(storage.imageById(31) == null);
+}
+
+test "kitty path media: a direct image still loads and a full reset keeps the switch" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var t = try Terminal.init(alloc, .{ .rows = 5, .cols = 5 });
+    defer t.deinit(alloc);
+    t.kitty_graphics_direct_only = true;
+
+    const cmd = try command.Parser.parseString(
+        alloc,
+        "a=t,t=d,i=1,s=1,v=2,c=10,r=1;///////////",
+    );
+    defer cmd.deinit(alloc);
+    const resp = execute(alloc, &t, &cmd).?;
+    try testing.expect(resp.ok());
+    try testing.expect(t.screens.active.kitty_images.imageById(1) != null);
+
+    t.fullReset();
+    try testing.expect(t.kitty_graphics_direct_only);
+    var probe = try testPathCommand(alloc, .query, .file, "/c11-kitty-path-media-missing/image.data");
+    defer probe.deinit(alloc);
+    const refused = execute(alloc, &t, &probe).?;
+    try testing.expectEqualStrings("EINVAL: unsupported medium", refused.message);
 }

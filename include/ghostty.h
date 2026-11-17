@@ -508,6 +508,10 @@ typedef struct {
   ghostty_surface_io_mode_e io_mode;
   ghostty_io_write_cb io_write_cb;
   void* io_write_userdata;
+  // Kitty graphics accept only directly transmitted data; file,
+  // temporary-file and shared-memory media are refused before any
+  // file-system access, with one reply for every path.
+  bool kitty_graphics_direct_only;
 } ghostty_surface_config_s;
 
 typedef struct {

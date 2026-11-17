@@ -427,6 +427,7 @@ pub const Surface = struct {
     io_mode: IoMode = .exec,
     io_write_cb: ?IoWriteCallback = null,
     io_write_userdata: ?*anyopaque = null,
+    kitty_graphics_direct_only: bool = false,
 
     /// The current title of the surface. The embedded apprt saves this so
     /// that getTitle works without the implementer needing to save it.
@@ -482,6 +483,11 @@ pub const Surface = struct {
 
         /// Userdata passed to io_write_cb.
         io_write_userdata: ?*anyopaque = null,
+
+        /// Kitty graphics accept only directly transmitted data: file,
+        /// temporary-file and shared-memory media are refused before any
+        /// file-system access (`Terminal.kitty_graphics_direct_only`).
+        kitty_graphics_direct_only: bool = false,
     };
 
     pub fn init(self: *Surface, app: *App, opts: Options) !void {
@@ -499,6 +505,7 @@ pub const Surface = struct {
             .io_mode = opts.io_mode,
             .io_write_cb = opts.io_write_cb,
             .io_write_userdata = opts.io_write_userdata,
+            .kitty_graphics_direct_only = opts.kitty_graphics_direct_only,
         };
 
         // Add ourselves to the list of surfaces on the app.
@@ -663,6 +670,10 @@ pub const Surface = struct {
 
     pub fn ioWriteUserdata(self: *const Surface) ?*anyopaque {
         return self.io_write_userdata;
+    }
+
+    pub fn kittyGraphicsDirectOnly(self: *const Surface) bool {
+        return self.kitty_graphics_direct_only;
     }
 
     pub fn close(self: *const Surface, process_alive: bool) void {
@@ -980,6 +991,7 @@ pub const Surface = struct {
             .io_mode = self.io_mode,
             .io_write_cb = self.io_write_cb,
             .io_write_userdata = self.io_write_userdata,
+            .kitty_graphics_direct_only = self.kitty_graphics_direct_only,
         };
     }
 
